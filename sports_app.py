@@ -11,12 +11,69 @@
 
 import gfx_engine as g
 import uasyncio as asyncio
-import time
 from app_base import App
-from wifi_manager import http_json
+from wifi_manager import http_stream, JsonSax
 import config
 
 _SPLIT_Y = 82          # boundary between scoreboard (top) and list (bottom)
+
+
+class _Scoreboard:
+    """SAX handler that extracts a compact event list from ESPN scoreboard
+    JSON while it streams, so the full payload never lands in RAM."""
+    def __init__(self):
+        self.events = []
+        self.cur = None
+        self.comp = None
+
+    def start(self, parent, kind, key):
+        if kind != "o":
+            return
+        if parent == ("a", "events") and len(self.events) < 40:
+            self.cur = {"name": "", "detail": "", "state": "pre", "rows": []}
+        elif parent == ("a", "competitors") and self.cur is not None:
+            self.comp = {"ab": "", "ath": "", "sc": "", "ha": ""}
+
+    def end(self, parent, kind, key):
+        if kind != "o":
+            return
+        if parent == ("a", "events") and self.cur is not None:
+            self.events.append(self.cur)
+            self.cur = None
+        elif parent == ("a", "competitors") and self.comp is not None:
+            if len(self.cur["rows"]) < 8:    # cap (F1 repeats drivers per session)
+                nm = self.comp["ab"] or self.comp["ath"] or "?"
+                self.cur["rows"].append((nm, self.comp["sc"], self.comp["ha"]))
+            self.comp = None
+
+    def value(self, stack, key, val):
+        if self.cur is None:
+            return
+        top = stack[-1] if stack else None
+        par = stack[-2] if len(stack) >= 2 else None
+        gp = stack[-3] if len(stack) >= 3 else None    # grandparent
+        if par == ("a", "events"):
+            if key == "shortName":
+                self.cur["name"] = val
+            elif key == "name" and not self.cur["name"]:
+                self.cur["name"] = val
+        if self.comp is not None:
+            if par == ("a", "competitors"):
+                if key == "score":
+                    self.comp["sc"] = val
+                elif key == "homeAway":
+                    self.comp["ha"] = val
+            # only a competitor's *direct* team/athlete (gp == competitors),
+            # so nested probable-pitcher / leader athletes don't clobber it
+            elif gp == ("a", "competitors"):
+                if top == ("o", "team") and key == "abbreviation":
+                    self.comp["ab"] = val
+                elif top == ("o", "athlete") and key == "shortName":
+                    self.comp["ath"] = val
+        if key == "shortDetail":
+            self.cur["detail"] = val
+        elif key == "state" and val in ("pre", "in", "post"):
+            self.cur["state"] = val
 
 
 class SportsApp(App):
@@ -48,40 +105,18 @@ class SportsApp(App):
         self.dirty = True
         url = "https://site.api.espn.com/apis/site/v2/sports/%s/scoreboard?limit=40" % path
         try:
-            status, data = await http_json(url)
-            self.cache[tier] = self._parse(data)
-            self.status = "" if self.cache[tier] else "no events"
+            sb = _Scoreboard()
+            sax = JsonSax(sb)
+            await http_stream(url, sax.feed)
+            for ev in sb.events:
+                ev["rows"].sort(key=lambda r: 0 if r[2] == "away" else 1)
+                ev["rows"] = [(r[0], r[1]) for r in ev["rows"]]
+            self.cache[tier] = sb.events
+            self.status = "" if sb.events else "no events"
         except Exception as e:
             self.status = "err: %s" % e
         self.loading = False
         self.dirty = True
-
-    def _parse(self, data):
-        out = []
-        for event in data.get("events", []):
-            try:
-                ev = {"name": event.get("shortName") or event.get("name", "?"),
-                      "detail": "", "state": "pre", "rows": []}
-                st = event.get("status", {}).get("type", {})
-                ev["detail"] = st.get("shortDetail", st.get("description", ""))
-                ev["state"] = st.get("state", "pre")
-                comp = (event.get("competitions") or [{}])[0]
-                competitors = comp.get("competitors", [])
-                # order away first when possible
-                competitors = sorted(
-                    competitors, key=lambda c: 0 if c.get("homeAway") == "away" else 1)
-                for c in competitors[:6]:
-                    if "team" in c:
-                        nm = c["team"].get("abbreviation") or c["team"].get("shortDisplayName", "?")
-                    elif "athlete" in c:
-                        nm = c["athlete"].get("shortName") or c["athlete"].get("displayName", "?")
-                    else:
-                        nm = "?"
-                    ev["rows"].append((nm, c.get("score", "")))
-                out.append(ev)
-            except Exception:
-                continue
-        return out
 
     async def refresh(self):
         await self._load(self.tier)

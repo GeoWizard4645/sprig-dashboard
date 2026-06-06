@@ -46,9 +46,16 @@ class App:
         pass
 
     def due(self):
+        if self.last_refresh == 0:        # never fetched -> fetch now
+            return True
         if self.refresh_interval == 0:
-            return self.last_refresh == 0
+            return False
         return time.ticks_diff(time.ticks_ms(), self.last_refresh) >= self.refresh_interval * 1000
+
+    def schedule_retry(self, secs):
+        """Make due() fire again in ~secs (used to back off after an error)."""
+        self.last_refresh = time.ticks_add(
+            time.ticks_ms(), -((self.refresh_interval - secs) * 1000))
 
     # -- rendering ----------------------------------------------------------
     def render(self):

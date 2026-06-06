@@ -165,12 +165,17 @@ class Dashboard:
             a = self.app
             if a.due() and not getattr(a, "loading", False):
                 a.last_refresh = time.ticks_ms()
+                ok = True
                 try:
                     await a.refresh()
                 except Exception as e:
                     a.status = "refresh err: %s" % e
                     a.dirty = True
+                    ok = False
                 gc.collect()
+                st = a.status or ""
+                if (not ok) or ("err" in st) or ("wifi" in st) or ("failed" in st):
+                    a.schedule_retry(15)
             await asyncio.sleep_ms(500)
 
     async def clock_task(self):
