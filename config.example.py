@@ -18,7 +18,8 @@ WIND_UNIT = "mph"            # "mph" | "kmh" | "ms" | "kn"
 
 # --- Finance app -----------------------------------------------------------
 # Yahoo Finance symbols. ^ and = characters are URL-encoded automatically.
-FINANCE_PAGE_1 = ["BTC-USD", "SL=F", "CL=F", "^IXIC"]
+# NOTE: silver futures is SI=F on Yahoo (SL=F is not a valid symbol).
+FINANCE_PAGE_1 = ["BTC-USD", "SI=F", "CL=F", "^IXIC"]
 FINANCE_PAGE_2 = ["GC=F", "MSTR", "AAPL", "NVDA", "ETH-USD", "MSFT", "JPY=X"]
 
 # --- Sports app ------------------------------------------------------------

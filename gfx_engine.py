@@ -167,6 +167,9 @@ class GFX:
     def pixel(self, x, y, c):
         self.fb.pixel(x, y, c)
 
+    def line(self, x0, y0, x1, y1, c):
+        self.fb.line(x0, y0, x1, y1, c)
+
     def draw_text(self, s, x, y, c=FG, scale=1, bg=None):
         """Draw text. scale=1 uses the native 8x8 font; scale>1 upscales it.
 

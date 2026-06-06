@@ -9,9 +9,9 @@ Four apps, switched with the D-pad cluster:
 | Button | App | What it does |
 |--------|-----|--------------|
 | **W** | Weather | Current temp (large), conditions, 3-day min/max bar chart (Open-Meteo) |
-| **S** | Finance | Ticker dashboard, 2 pages, drill-down + custom ticker search (Yahoo Finance) |
-| **D** | Sports | F1 / NFL / NBA / MLB scores & league board (ESPN public API) |
-| **A** | Ghost Sniffer | Live WLAN RSSI histogram + signal waterfall (`wlan.scan()`) |
+| **S** | Finance | 2 pages of tickers; drill-down with a **price chart + selectable timeframe** (1D/5D/1M/6M/1Y) and custom ticker search (Yahoo Finance) |
+| **D** | Sports | F1 / NFL / NBA / MLB; **live games prioritised** (auto-focus, opens on whichever league is live); **F1 driver standings** when no race is on (ESPN public API) |
+| **A** | Ghost Sniffer | Live WLAN RSSI histogram + waterfall, **plus a Sprig system monitor** (die temp, CPU clock, RAM/flash, uptime, IP/MAC, RSSI) — toggle with J/L |
 
 All data sources are **$0-cost, key-free public endpoints**.
 
@@ -24,6 +24,11 @@ The right-hand action cluster (**I J K L**) navigates inside the active app:
 - **double-tap J or K** → back / cancel
 
 The left D-pad (**W A S D**) switches apps at any time.
+
+Per-app extras:
+- **Finance detail:** J/L change the chart timeframe, I/K flip to the prev/next ticker without leaving the chart.
+- **Sports:** J/L switch league tab (a red dot marks tabs with a live game); I/K scroll games or the F1 standings.
+- **Ghost Sniffer:** J/L toggle RF-scanner ↔ system monitor.
 
 ## Hardware pin map
 
