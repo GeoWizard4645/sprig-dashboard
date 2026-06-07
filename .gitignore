@@ -1,12 +1,5 @@
-# Local secrets — never commit Wi-Fi credentials or API keys
+# Local secrets — never commit Wi-Fi credentials
 config.py
-secrets.py
-# Coinbase / API credentials — NEVER commit these
-cdp_api_key.json
-*_api_key.json
-*.pem
-*.key
-*private*key*
 
 # Python / MicroPython artifacts
 __pycache__/
