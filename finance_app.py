@@ -13,6 +13,7 @@
 
 import gfx_engine as g
 import uasyncio as asyncio
+import gc
 from app_base import App
 from wifi_manager import http_json
 import config
@@ -85,6 +86,34 @@ async def _fetch(sym, rng="1d", itv="15m", want_closes=False, tries=3):
             pct = ((price - prev) / prev * 100) if (price and prev) else 0.0
             return {"price": price, "prev": prev, "high": high, "low": low,
                     "pct": pct, "closes": closes}
+        except Exception as e:
+            last = e
+            await asyncio.sleep_ms(300 * (attempt + 1))
+    raise last
+
+
+async def _spark_one(sym, rng, itv):
+    """Single-symbol chart data via the SPARK endpoint -- ~6x smaller than the
+    chart endpoint (just a close array), which avoids the MemoryError when
+    opening charts. high/low are derived from the closes."""
+    last = None
+    for attempt in range(3):
+        host = "query1" if attempt % 2 == 0 else "query2"
+        url = ("https://%s.finance.yahoo.com/v8/finance/spark"
+               "?symbols=%s&range=%s&interval=%s") % (host, _enc(sym), rng, itv)
+        try:
+            status, data = await http_json(url, max_bytes=20000)
+            d = data.get(sym) or (list(data.values())[0] if data else None)
+            if not d:
+                raise ValueError("no data")
+            closes = [c for c in d.get("close", []) if c is not None]
+            if not closes:
+                raise ValueError("no closes")
+            price = closes[-1]
+            prev = d.get("previousClose") or d.get("chartPreviousClose")
+            pct = ((price - prev) / prev * 100) if (price and prev) else 0.0
+            return {"price": price, "prev": prev, "high": max(closes),
+                    "low": min(closes), "pct": pct, "closes": closes}
         except Exception as e:
             last = e
             await asyncio.sleep_ms(300 * (attempt + 1))
@@ -177,8 +206,9 @@ class FinanceApp(App):
         self.chart = None
         self.status = ""
         self.dirty = True
+        gc.collect()
         try:
-            data = await _fetch(sym, rng, itv, want_closes=True)
+            data = await _spark_one(sym, rng, itv)
             if tok == self._tok:
                 self.chart = data
         except Exception as e:
@@ -385,8 +415,11 @@ class FinanceApp(App):
             if self.status:
                 gfx.draw_text(self.status, 4, g.HEIGHT - 9, g.YELLOW)
             return
-        price = q.get("price")
-        pct = q.get("pct", 0)
+        # headline price + DAY change come from the live 1D quote (always the
+        # day's move); the chart `q` supplies the selected-timeframe series.
+        qd = self.quotes.get(sym) or q
+        price = qd.get("price")
+        pct = qd.get("pct", 0)
         col = g.GREEN if pct >= 0 else g.RED
         pstr = _fmt(price)
         # price right-aligned (scale 2 = 16px/char), clamped so it can't hit the label

@@ -2,18 +2,24 @@
 # ---------------------------------------------------------------------------
 # Score / standings aggregator over ESPN's public site API (no key).
 #
-# Two MODES (double-tap I/L to toggle):  LIVE  and  STANDINGS
-# Tabs (J/L):  ALL · F1 · NFL · NBA · MLB
-#   - ALL is the universal default in BOTH modes: every in-progress game across
-#     all leagues, aggregated. (Kept exactly as before.)
-#   - In LIVE mode a league tab shows that league's scoreboard.
-#   - In STANDINGS mode a league tab shows the table — F1 shows DRIVERS and
-#     CONSTRUCTORS as two scrollable sections; NFL/NBA/MLB show W-L tables.
+# Layout has a visible TWO-ROW header:
+#   Row 1: section pills  [ LIVE ] [ STANDINGS ]   (double-tap I/L to switch)
+#   Row 2: league tabs    ALL · F1 · NFL · NBA · MLB   (J/L)
 #
-# Memory: a Pico W can't hold every league's data at once, so only the data for
-# the view you're looking at lives in RAM; everything else is parked on flash
-# (`/cache/spscore_N`, `/cache/spstd_N`) and reloaded instantly when needed.
-# All fetches are serialized (one TLS connection at a time) and retried.
+#   - ALL is the universal default in BOTH sections: every in-progress game
+#     across all leagues, aggregated.
+#   - LIVE + a league tab  -> that league's scoreboard.
+#   - STANDINGS + a league -> that league's table (F1 = drivers AND
+#     constructors as two scrollable sections; others = W-L tables).
+#
+# Efficiency:
+#   - LIVE rotates ONE league per refresh (fast, always-fresh) instead of
+#     stalling on all four at once.
+#   - STANDINGS are hard-stored on flash: fetched once, then served instantly
+#     and only re-downloaded every few hours in the background (they barely
+#     change between games).
+#   - Only the viewed league's data is held in RAM; the rest lives on flash.
+#   - All fetches are serialized (one TLS connection at a time) and retried.
 # ---------------------------------------------------------------------------
 
 import gfx_engine as g
@@ -25,7 +31,10 @@ from wifi_manager import http_stream, JsonSax
 import config
 import store
 
-_SPLIT_Y = 82
+_SEC_Y = g.CONTENT_Y          # section pills row
+_TAB_Y = g.CONTENT_Y + 11     # league tabs row
+_BODY_Y = g.CONTENT_Y + 23    # content start
+_SPLIT_Y = 88                 # scoreboard / list divider
 _STATE_ORDER = {"in": 0, "pre": 1, "post": 2}
 
 
@@ -144,9 +153,9 @@ class SportsApp(App):
     name = "SPORTS"
     refresh_interval = config.SPORTS_REFRESH_S
     bg_cost = "heavy"
-    _ACTIVE_INTERVAL = 30        # refresh cadence while on screen (s)
-    _BG_INTERVAL = 180           # relaxed cadence when off screen (s)
-    _STD_TTL = 1800              # re-warm standings at most this often (s)
+    _ACTIVE_INTERVAL = 10        # rotate a league this often while on screen (s)
+    _BG_INTERVAL = 120           # relaxed cadence when off screen (s)
+    _STD_TTL = 21600             # re-download standings at most every 6 h
 
     def __init__(self, gfx, wifi):
         super().__init__(gfx, wifi)
@@ -157,9 +166,17 @@ class SportsApp(App):
         self.cursor = 0
         self.std_offset = 0
         self.loading = False
-        # RAM holds only: the live aggregate (small) + the ONE viewed league's
-        # scores and the ONE viewed league's standings. Rest lives on flash.
-        self.live = store.load("sports_live", []) or []
+        self._rot = 0                # which league the live rotation fetches next
+        # live games per league (small) -> rebuilt into the flat aggregate
+        self.live_by = {}
+        for k, v in (store.load("sports_livebytier", {}) or {}).items():
+            try:
+                self.live_by[int(k)] = v
+            except Exception:
+                pass
+        self.live = []
+        self._rebuild_live()
+        # one viewed league's scoreboard + one viewed league's table in RAM
         self.score = []
         self.score_tier = -1
         self.std = None
@@ -174,10 +191,16 @@ class SportsApp(App):
         return self.tiers[t][2] if t >= 0 else None
 
     def _has_live(self, tier):
-        lab = self.tiers[tier][0]
-        return any(l == lab for l, _ in self.live)
+        return bool(self.live_by.get(tier))
 
-    # -- fetching (all serialized by the HTTP layer's net lock) -------------
+    def _rebuild_live(self):
+        live = []
+        for t in range(len(self.tiers)):
+            for ev in self.live_by.get(t, []):
+                live.append((self.tiers[t][0], ev))
+        self.live = live
+
+    # -- fetching (serialized by the HTTP layer's net lock) ----------------
     async def _stream(self, url, factory, tries=3):
         last = None
         for attempt in range(tries):
@@ -201,30 +224,25 @@ class SportsApp(App):
         evs.sort(key=lambda e: _STATE_ORDER.get(e["state"], 3))
         return evs
 
-    async def _load_live(self):
+    async def _rotate_live(self):
+        """Refresh ONE league per call and merge it into the live aggregate."""
         if not await self.wifi.ensure():
             self.status = "no wifi"
             return
-        live = []
-        errs = 0
-        for tier in range(len(self.tiers)):
-            self.status = "scanning %s..." % self.tiers[tier][0]
-            self.dirty = True
-            try:
-                evs = await self._fetch_scores(tier)
-                store.save("spscore_%d" % tier, evs)
-                if tier == self.score_tier:
-                    self.score = evs
-                for ev in evs:
-                    if ev["state"] == "in":
-                        live.append((self.tiers[tier][0], ev))
-                evs = None
-            except Exception:
-                errs += 1
-            gc.collect()
-        self.live = live
-        store.save("sports_live", live)
-        self.status = "" if live else ("fetch failed" if errs == len(self.tiers) else "nothing live")
+        tier = self._rot
+        self._rot = (self._rot + 1) % len(self.tiers)
+        self.status = "updating %s..." % self.tiers[tier][0]
+        self.dirty = True
+        evs = await self._fetch_scores(tier)
+        store.save("spscore_%d" % tier, evs)
+        if tier == self.score_tier:
+            self.score = evs
+        self.live_by[tier] = [ev for ev in evs if ev["state"] == "in"]
+        store.save("sports_livebytier", {str(k): v for k, v in self.live_by.items()})
+        self._rebuild_live()
+        evs = None
+        gc.collect()
+        self.status = "" if self.live else "nothing live"
 
     async def _refresh_score(self, tier):
         if not await self.wifi.ensure():
@@ -234,6 +252,9 @@ class SportsApp(App):
         store.save("spscore_%d" % tier, evs)
         self.score = evs
         self.score_tier = tier
+        # this league's live contribution is fresh too
+        self.live_by[tier] = [ev for ev in evs if ev["state"] == "in"]
+        self._rebuild_live()
         self.status = ""
 
     async def _load_standings(self, tier, keep):
@@ -246,7 +267,7 @@ class SportsApp(App):
         kind = "f1" if path.startswith("racing") else "team"
         obj = {"kind": kind, "groups": h.groups}
         self.std_time[tier] = time.ticks_ms()
-        store.save("spstd_%d" % tier, obj)
+        store.save("spstd_%d" % tier, obj, force=True)   # hard-store; rarely written
         if keep:
             self.std = obj
             self.std_tier = tier
@@ -262,6 +283,8 @@ class SportsApp(App):
         if self.std_tier != tier:
             self.std = store.load("spstd_%d" % tier, None)
             self.std_tier = tier
+            if self.std is not None and tier not in self.std_time:
+                self.std_time[tier] = time.ticks_ms()   # already warm on flash
 
     def _prime(self):
         if self.tab == 0:
@@ -276,11 +299,15 @@ class SportsApp(App):
         self.loading = True
         try:
             if self.tab == 0:
-                await self._load_live()
+                await self._rotate_live()           # ALL: rotate one league
             elif self.mode == "LIVE":
                 await self._refresh_score(self._tier())
             else:
-                await self._load_standings(self._tier(), keep=True)
+                tier = self._tier()
+                self._view_std(tier)
+                if self.std is None:                # not on flash yet -> fetch once
+                    await self._load_standings(tier, keep=True)
+                # otherwise served from flash; prefetch re-warms it every few hours
         except Exception as e:
             self.status = "err: %s" % str(e)[:16]
         self.loading = False
@@ -293,7 +320,9 @@ class SportsApp(App):
         return time.ticks_diff(time.ticks_ms(), self.last_refresh) >= interval * 1000
 
     async def prefetch_step(self):
-        """Background: warm standings to FLASH (not RAM), one league per call."""
+        """Background: hard-store standings to FLASH, one league per call. Fetches
+        only what's missing or older than 6 h, then idles -- so standings are
+        essentially pre-downloaded and almost never re-fetched."""
         if self.loading:
             return False
         now = time.ticks_ms()
@@ -343,7 +372,7 @@ class SportsApp(App):
         self.cursor = 0
         self.std_offset = 0
         self._prime()
-        self.last_refresh = 0       # force a fresh fetch on the next scheduler tick
+        self.last_refresh = 0       # refresh the new view promptly
         self.dirty = True
 
     def on_left(self):
@@ -363,7 +392,7 @@ class SportsApp(App):
     def on_enter(self):
         self.active = True
         self._prime()
-        self.last_refresh = 0       # refresh promptly when opened
+        self.last_refresh = 0
         self.dirty = True
 
     def on_exit(self):
@@ -371,17 +400,16 @@ class SportsApp(App):
 
     # -- rendering ----------------------------------------------------------
     def render(self):
-        self._tabs()
+        self._header()
         if self.tab == 0:
             self._live_home()
-            return
-        if self.mode == "STANDINGS":
+        elif self.mode == "STANDINGS":
             self._view_std(self._tier())
             self._render_standings()
         else:
             self._view_scores(self._tier())
             if not self.score:
-                self.gfx.draw_text(self.status or "loading...", 6, _SPLIT_Y - 20,
+                self.gfx.draw_text(self.status or "loading...", 6, _BODY_Y + 8,
                                   g.YELLOW if self.status else g.GREY)
                 return
             if self.cursor >= len(self.score):
@@ -389,30 +417,40 @@ class SportsApp(App):
             self._scoreboard(self.score[self.cursor])
             self._list(self.score)
 
-    def _tabs(self):
+    def _header(self):
         gfx = self.gfx
+        # row 1: section pills
+        x = 2
+        for key in ("LIVE", "STANDINGS"):
+            active = (self.mode == key)
+            w = 8 * len(key) + 6
+            if active:
+                gfx.draw_rect(x, _SEC_Y, w, 10, g.ACCENT, fill=True)
+                gfx.draw_text(key, x + 3, _SEC_Y + 1, g.BLACK)
+            else:
+                gfx.draw_rect(x, _SEC_Y, w, 10, g.DIM)
+                gfx.draw_text(key, x + 3, _SEC_Y + 1, g.GREY)
+            x += w + 3
+        gfx.draw_text("dblI/L", g.WIDTH - 8 * 6 - 1, _SEC_Y + 1, g.DIM)
+        # row 2: league tabs
         x = 1
-        y = g.CONTENT_Y
         for i, label in enumerate(self.labels):
             active = (i == self.tab)
             live = (i == 0 and bool(self.live)) or (i >= 1 and self._has_live(i - 1))
             w = 8 * len(label) + 4
             if active:
-                gfx.draw_rect(x, y, w, 11, g.ACCENT, fill=True)
-                gfx.draw_text(label, x + 2, y + 2, g.BLACK)
+                gfx.draw_rect(x, _TAB_Y, w, 10, g.ACCENT, fill=True)
+                gfx.draw_text(label, x + 2, _TAB_Y + 1, g.BLACK)
             else:
-                gfx.draw_rect(x, y, w, 11, g.RED if live else g.DIM)
-                gfx.draw_text(label, x + 2, y + 2, g.RED if live else g.GREY)
+                gfx.draw_rect(x, _TAB_Y, w, 10, g.RED if live else g.DIM)
+                gfx.draw_text(label, x + 2, _TAB_Y + 1, g.RED if live else g.GREY)
             if live and not active:
-                gfx.draw_rect(x + w - 3, y + 1, 2, 2, g.RED, fill=True)
+                gfx.draw_rect(x + w - 3, _TAB_Y + 1, 2, 2, g.RED, fill=True)
             x += w + 2
-        # mode indicator at far right
-        pill = "LV" if self.mode == "LIVE" else "ST"
-        gfx.draw_text(pill, g.WIDTH - 17, y + 2, g.RED if self.mode == "LIVE" else g.BLUE)
 
     def _live_home(self):
         gfx = self.gfx
-        y = g.CONTENT_Y + 14
+        y = _BODY_Y
         if not self.live:
             if self.loading:
                 gfx.draw_text(self.status or "scanning...", 6, y + 8, g.YELLOW)
@@ -421,8 +459,8 @@ class SportsApp(App):
                 gfx.draw_text("J/L league  dblI/L table", 6, y + 22, g.DIM)
             return
         gfx.draw_text("LIVE NOW  (%d)" % len(self.live), 4, y, g.RED)
-        y += 13
-        row_h = 22
+        y += 12
+        row_h = 20
         rows_fit = (g.HEIGHT - y) // row_h
         if self.cursor >= len(self.live):
             self.cursor = 0
@@ -440,7 +478,7 @@ class SportsApp(App):
                              40, y, g.WHITE)
             else:
                 gfx.draw_text(ev["name"], 40, y, g.WHITE)
-            gfx.draw_text(ev["detail"], 4, y + 10, g.RED)
+            gfx.draw_text(ev["detail"], 4, y + 9, g.RED)
             y += row_h
 
     @staticmethod
@@ -477,7 +515,7 @@ class SportsApp(App):
     def _render_standings(self):
         gfx = self.gfx
         st = self.std
-        y = g.CONTENT_Y + 13
+        y = _BODY_Y
         if st is None:
             gfx.draw_text(self.status or "loading table...", 6, y + 6, g.YELLOW)
             return
@@ -487,7 +525,7 @@ class SportsApp(App):
             return
         gfx.draw_text("%s TABLE" % self.labels[self.tab], 4, y, g.ACCENT)
         gfx.draw_text("I/K", g.WIDTH - 8 * 3 - 2, y, g.DIM)
-        y += 12
+        y += 11
         row_h = 10
         rows_fit = (g.HEIGHT - y) // row_h
         if self.std_offset > max(0, len(lines) - rows_fit):
@@ -501,34 +539,31 @@ class SportsApp(App):
                 col = g.YELLOW if (focus and txt.startswith(focus)) else g.WHITE
                 gfx.draw_text(txt, 6, y, col)
             y += row_h
-        # scroll arrows
         if self.std_offset > 0:
-            gfx.draw_text("^", g.WIDTH - 9, g.CONTENT_Y + 25, g.ACCENT)
+            gfx.draw_text("^", g.WIDTH - 9, _BODY_Y + 12, g.ACCENT)
         if self.std_offset + rows_fit < len(lines):
             gfx.draw_text("v", g.WIDTH - 9, g.HEIGHT - 9, g.ACCENT)
 
     def _scoreboard(self, ev):
         gfx = self.gfx
         focus = self._focus()
-        y = g.CONTENT_Y + 14
+        y = _BODY_Y
         state = ev["state"]
         state_col = g.RED if state == "in" else (g.GREEN if state == "post" else g.YELLOW)
-        if state == "in":
-            gfx.draw_text("LIVE", 6, g.CONTENT_Y + 1, g.RED)
         rows = ev["rows"]
         if len(rows) >= 2 and len(rows[0][0]) <= 5:
             for idx in range(2):
                 nm, sc = rows[idx]
-                ry = y + idx * 26
+                ry = y + idx * 22
                 col = g.YELLOW if (focus and nm == focus) else g.WHITE
-                gfx.draw_text(nm, 6, ry, col, scale=2, max_w=80)
+                gfx.draw_text(nm, 6, ry, col, scale=2, max_w=78)
                 sc = str(sc)
                 gfx.draw_text(sc, g.WIDTH - 6 - 8 * 3 * len(sc), ry, col, scale=3)
-            gfx.draw_text(ev["detail"], 6, y + 53, state_col)
+            gfx.draw_text(ev["detail"], 6, y + 46, state_col)
         else:
             gfx.draw_text(ev["name"], 6, y, g.WHITE)
-            gfx.draw_text(ev["detail"], 6, y + 12, state_col)
-            ly = y + 26
+            gfx.draw_text(ev["detail"], 6, y + 11, state_col)
+            ly = y + 24
             for i, (nm, sc) in enumerate(rows[:3]):
                 gfx.draw_text("%d. %s" % (i + 1, nm), 8, ly, g.GREY)
                 ly += 10
@@ -537,7 +572,7 @@ class SportsApp(App):
     def _list(self, events):
         gfx = self.gfx
         focus = self._focus()
-        y = _SPLIT_Y + 2
+        y = _SPLIT_Y + 1
         row_h = 11
         rows_fit = (g.HEIGHT - y) // row_h
         start = self.cursor - rows_fit + 1 if self.cursor >= rows_fit else 0
@@ -558,7 +593,6 @@ class SportsApp(App):
                 col = g.RED
             elif sel:
                 col = g.WHITE
-            # leave room for the status tag on the right
             gfx.draw_text(line, 3, y, col, max_w=g.WIDTH - 56)
             st = ev["detail"]
             if st:

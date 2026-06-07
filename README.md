@@ -29,7 +29,7 @@ Per-app extras:
 - **Finance list:** I/K scroll all tickers in one list; double-I/L opens detail; the last row is search.
 - **Finance search:** instant single-press (no double-click) — J/L move the ribbon, **I** picks the highlighted key, **K** backspaces; scroll to **OK** to search or **CANCEL** to exit.
 - **Finance detail:** J/L change the chart timeframe, I/K flip to the prev/next ticker without leaving the chart.
-- **Sports:** J/L switch tab (ALL/F1/NFL/NBA/MLB); **ALL** = all live games everywhere (the universal default in both modes). **Double-tap I/L toggles LIVE ↔ STANDINGS** (the `LV`/`ST` pill at top-right shows which). I/K scroll; standings show ▲/▼ when there's more off-screen.
+- **Sports:** a visible two-row header — top row is the **[LIVE] [STANDINGS]** section selector (**double-tap I/L** to switch), bottom row is the league tabs **ALL/F1/NFL/NBA/MLB** (J/L). **ALL** = all live games everywhere (the universal default in both sections). I/K scroll; standings show ▲/▼ when there's more off-screen.
 - **Ghost Sniffer:** J/L cycle RF scan → channel analyzer → system monitor; I/K scroll APs in RF view.
 
 ## Hardware pin map
@@ -109,8 +109,15 @@ The dashboard is built to be usable instantly and seamless after a short warm-up
   concurrent fetches were the main cause of `[Errno 12]` (out-of-memory). Sports
   also keeps only the *currently viewed* league's data in RAM (everything else
   on flash), freeing heap for the TLS buffer so refreshes stop failing.
-- **Always-on fetching.** Whatever screen you're on refreshes on its own
-  cadence (sports every 30 s while watching), so live scores keep updating.
+- **Always-on rotation.** Whatever screen you're on refreshes continuously;
+  the background loop rotates through stock prices and live scores so they stay
+  current. The sports **LIVE** view refreshes **one league per cycle** (instead
+  of stalling on all four at once) — fast, and always rolling forward.
+- **Standings are pre-downloaded.** They barely change between games, so they're
+  hard-stored on flash: fetched once, served instantly thereafter, and only
+  re-downloaded every ~6 h in the background. Opening a table is immediate.
+- **Charts use the spark endpoint** (~6× smaller than the chart endpoint), which
+  fixes the out-of-memory error when opening a stock chart.
 - **No overflow.** All text is truncated to the screen width (no overlap / no
   half-glyphs cut at the edge); long lists scroll with I/K.
 

@@ -42,7 +42,7 @@ AUDIO_PIN = 27               # PWM-capable GPIO for a piezo buzzer, or None
 
 # --- Tuning ----------------------------------------------------------------
 WEATHER_REFRESH_S = 900      # 15 min
-FINANCE_REFRESH_S = 120      # 2 min
+FINANCE_REFRESH_S = 60       # 1 min
 SPORTS_REFRESH_S = 60        # 1 min
 NET_SCAN_S = 4               # Ghost Sniffer rescan interval
 HTTP_TIMEOUT_S = 12
