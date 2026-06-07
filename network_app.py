@@ -57,7 +57,7 @@ def _read_temp_c():
 
 
 class NetworkApp(App):
-    name = "GHOST SNIFFER"
+    name = "SNIFFER"
     refresh_interval = config.NET_SCAN_S
     background_refresh = False     # wlan.scan() blocks; only run while on screen
 

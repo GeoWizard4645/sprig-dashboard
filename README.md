@@ -10,7 +10,7 @@ Four apps, switched with the D-pad cluster:
 |--------|-----|--------------|
 | **W** | Weather | Current temp (large), conditions, 3-day min/max bar chart (Open-Meteo) |
 | **S** | Finance | One scrolling ticker list (incl. S&P 500, Dow, QQQ, futures); drill-down with a **price chart + selectable timeframe** (1D/5D/1M/6M/1Y); single-press ribbon search. All list prices fetched in **one** Yahoo *spark* request; fetches retry across query1/query2 hosts |
-| **D** | Sports | **LIVE home** aggregating in-progress games across all leagues + per-league tabs (F1/NFL/NBA/MLB, lazy); **double-tap I/L toggles SCORES ↔ STANDINGS** — F1 shows **drivers AND constructors** as two scrollable sections, NFL/NBA/MLB show W-L tables. All fetches retry for reliability (ESPN public API) |
+| **D** | Sports | Two modes (**double-tap I/L** toggles **LIVE ↔ STANDINGS**). Tabs (J/L): **ALL · F1 · NFL · NBA · MLB**. **ALL** is the universal default in both modes — all in-progress games across every league. League tabs show that league's scoreboard (LIVE) or table (STANDINGS): F1 = **drivers + constructors** (two scrollable sections), others = W-L tables. ESPN public API; all fetches retried |
 | **A** | Ghost Sniffer | Three J/L views: RF signal histogram + waterfall + open-network count; **2.4 GHz channel-congestion analyzer**; and a **Sprig system monitor** (die temp, CPU clock, RAM/flash, uptime, IP/MAC, RSSI) |
 
 All data sources are **$0-cost, key-free public endpoints**.
@@ -29,7 +29,7 @@ Per-app extras:
 - **Finance list:** I/K scroll all tickers in one list; double-I/L opens detail; the last row is search.
 - **Finance search:** instant single-press (no double-click) — J/L move the ribbon, **I** picks the highlighted key, **K** backspaces; scroll to **OK** to search or **CANCEL** to exit.
 - **Finance detail:** J/L change the chart timeframe, I/K flip to the prev/next ticker without leaving the chart.
-- **Sports:** J/L switch tab — **LIVE** is the home tab (all leagues' live games); a red dot marks tabs with a live game. **Double-tap I/L toggles SCORES ↔ STANDINGS** (the pill at top-right shows which). I/K scroll.
+- **Sports:** J/L switch tab (ALL/F1/NFL/NBA/MLB); **ALL** = all live games everywhere (the universal default in both modes). **Double-tap I/L toggles LIVE ↔ STANDINGS** (the `LV`/`ST` pill at top-right shows which). I/K scroll; standings show ▲/▼ when there's more off-screen.
 - **Ghost Sniffer:** J/L cycle RF scan → channel analyzer → system monitor; I/K scroll APs in RF view.
 
 ## Hardware pin map
@@ -104,6 +104,15 @@ The dashboard is built to be usable instantly and seamless after a short warm-up
   request; sports streams + parses on the fly (never buffering the 100-350 KB
   payloads) and only the visible/needed league is fetched. The RF scanner is
   the only app that doesn't run in the background (its `wlan.scan()` blocks).
+- **One connection at a time.** All network I/O is serialized behind a single
+  lock — a Pico W can only afford one TLS connection's buffers at once, so
+  concurrent fetches were the main cause of `[Errno 12]` (out-of-memory). Sports
+  also keeps only the *currently viewed* league's data in RAM (everything else
+  on flash), freeing heap for the TLS buffer so refreshes stop failing.
+- **Always-on fetching.** Whatever screen you're on refreshes on its own
+  cadence (sports every 30 s while watching), so live scores keep updating.
+- **No overflow.** All text is truncated to the screen width (no overlap / no
+  half-glyphs cut at the edge); long lists scroll with I/K.
 
 ## Design notes & constraints
 

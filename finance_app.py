@@ -388,17 +388,23 @@ class FinanceApp(App):
         price = q.get("price")
         pct = q.get("pct", 0)
         col = g.GREEN if pct >= 0 else g.RED
-        gfx.draw_text(_fmt(price), g.WIDTH - 8 * len(_fmt(price)) - 2, y, g.WHITE, scale=2)
-        gfx.draw_text("%s%.2f%% day" % ("+" if pct >= 0 else "", pct), 4, y + 18, col)
+        pstr = _fmt(price)
+        # price right-aligned (scale 2 = 16px/char), clamped so it can't hit the label
+        px = max(8 * 2 * 4, g.WIDTH - 16 * len(pstr) - 2)
+        gfx.draw_text(pstr, px, y, g.WHITE, scale=2)
+        gfx.draw_text("%s%.2f%% today" % ("+" if pct >= 0 else "", pct), 4, y + 18, col,
+                     max_w=g.WIDTH - 8)
+        self._tf_tabs(y + 28)
         closes = q.get("closes", [])
+        cy = y + 42
+        self._draw_chart(closes, 2, cy, g.WIDTH - 4, 50)
+        # period change overlaid in the chart's free top-right corner
         if len(closes) >= 2 and closes[0]:
             ppct = (closes[-1] - closes[0]) / closes[0] * 100
             pc = g.GREEN if ppct >= 0 else g.RED
             txt = "%s %s%.1f%%" % (_TFS[self.tf][0], "+" if ppct >= 0 else "", ppct)
-            gfx.draw_text(txt, g.WIDTH - 8 * len(txt) - 2, y + 18, pc)
-        self._tf_tabs(y + 28)
-        self._draw_chart(closes, 2, y + 42, g.WIDTH - 4, 52)
-        s = "H %s L %s Prev %s" % (_fmt(q.get("high")), _fmt(q.get("low")), _fmt(q.get("prev")))
+            gfx.draw_text(txt, g.WIDTH - 8 * len(txt) - 5, cy + 2, pc, bg=g.PANEL)
+        s = "H%s L%s Prev%s" % (_fmt(q.get("high")), _fmt(q.get("low")), _fmt(q.get("prev")))
         gfx.draw_text(s, 3, g.HEIGHT - 9, g.GREY)
 
     def _render_search(self):

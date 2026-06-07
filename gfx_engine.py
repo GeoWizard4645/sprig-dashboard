@@ -170,12 +170,20 @@ class GFX:
     def line(self, x0, y0, x1, y1, c):
         self.fb.line(x0, y0, x1, y1, c)
 
-    def draw_text(self, s, x, y, c=FG, scale=1, bg=None):
+    def draw_text(self, s, x, y, c=FG, scale=1, bg=None, max_w=None):
         """Draw text. scale=1 uses the native 8x8 font; scale>1 upscales it.
 
-        Returns the x just past the last glyph (handy for chaining).
+        Text is truncated so it never runs past `max_w` (defaults to the right
+        edge of the screen) -- preventing the overflow/overlap you'd otherwise
+        get from a string that's too long. Returns the x past the last glyph.
         """
         s = str(s)
+        avail = (WIDTH - x) if max_w is None else max_w
+        fit = avail // (8 * scale)
+        if fit <= 0:
+            return x
+        if len(s) > fit:
+            s = s[:fit]
         if scale <= 1:
             if bg is not None:
                 self.fb.fill_rect(x, y, 8 * len(s), 8, bg)
@@ -211,11 +219,14 @@ class GFX:
     # -- composite widgets --------------------------------------------------
     def header(self, app_name, wifi_ok, clock=""):
         self.fb.fill_rect(0, 0, WIDTH, HEADER_H, HEADER_BG)
-        self.fb.text(app_name, 3, 3, ACCENT)
         dot = GREEN if wifi_ok else RED
         self.fb.fill_rect(WIDTH - 9, 4, 5, 5, dot)
+        clock_x = WIDTH - 12
         if clock:
-            self.fb.text(clock, WIDTH - 9 - 8 * len(clock) - 4, 3, GREY)
+            clock_x = WIDTH - 9 - 8 * len(clock) - 4
+            self.fb.text(clock, clock_x, 3, GREY)
+        # truncate the app name so it can never run into the clock/dot
+        self.draw_text(app_name, 3, 3, ACCENT, max_w=clock_x - 5)
         self.fb.hline(0, HEADER_H, WIDTH, DIM)
 
     def vbar(self, x, y, w, h, frac, c, bgc=PANEL):

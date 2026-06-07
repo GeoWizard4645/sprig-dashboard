@@ -87,12 +87,13 @@ class WeatherApp(App):
         gfx.draw_rect(4 + tw + 3, g.CONTENT_Y + 6, 5, 5, g.ACCENT)
         gfx.draw_text(self.unit, 4 + tw + 10, g.CONTENT_Y + 8, g.ACCENT, scale=2)
 
-        # condition + feels-like
+        # condition + a single compact stats line that fits the 160px width
         gfx.draw_text(_code_text(code), 6, g.CONTENT_Y + 46, g.ACCENT)
-        if feels is not None:
-            gfx.draw_text("Feels %d  Wind %s  Hum %s%%" % (
-                round(feels), "--" if wind is None else round(wind),
-                "--" if hum is None else round(hum)), 6, g.CONTENT_Y + 56, g.GREY)
+        f = "--" if feels is None else "%d" % round(feels)
+        h = "--" if hum is None else "%d" % round(hum)
+        w = "--" if wind is None else "%d" % round(wind)
+        gfx.draw_text("Feels %s%s  H%s%%  W%s" % (f, self.unit, h, w),
+                     6, g.CONTENT_Y + 56, g.GREY)
 
         # --- 3-day min/max range chart ---
         self._chart(daily)

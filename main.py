@@ -48,6 +48,7 @@ class Dashboard:
         self.current = "W"
         self.app = self.apps["W"]
         self.clock = ""
+        self.net = asyncio.Lock()      # serialize the refresh + prefetch loops
 
         # buzzer (optional, carrier-dependent)
         self.buzzer = None
@@ -191,7 +192,8 @@ class Dashboard:
                     a.last_refresh = time.ticks_ms()
                     ok = True
                     try:
-                        await a.refresh()
+                        async with self.net:
+                            await a.refresh()
                     except Exception as e:
                         a.status = "refresh err: %s" % e
                         a.dirty = True
@@ -219,7 +221,9 @@ class Dashboard:
             if not self.wifi.connected:
                 continue
             try:
-                if await sports.prefetch_step():
+                async with self.net:
+                    did = await sports.prefetch_step()
+                if did:
                     gc.collect()
             except Exception:
                 pass

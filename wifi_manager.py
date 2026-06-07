@@ -19,6 +19,11 @@ import config
 
 _UA = "Mozilla/5.0 (Linux; PicoW) SprigDashboard/1.0"
 
+# Serialize ALL network I/O: a Pico W can only afford one TLS connection's
+# buffers at a time. Concurrent fetches are the main cause of [Errno 12] ENOMEM,
+# so every request acquires this lock for the duration of its connection.
+_net_lock = asyncio.Lock()
+
 
 class WifiManager:
     def __init__(self, ssid=None, pwd=None):
@@ -96,6 +101,7 @@ async def http_get_raw(url, headers=None, timeout=None, max_bytes=None):
     gc.collect()
 
     reader = writer = None
+    await _net_lock.acquire()
     try:
         conn = asyncio.open_connection(host, port, ssl=use_ssl) if use_ssl \
             else asyncio.open_connection(host, port)
@@ -132,6 +138,7 @@ async def http_get_raw(url, headers=None, timeout=None, max_bytes=None):
                 await writer.wait_closed()
             except Exception:
                 pass
+        _net_lock.release()
         gc.collect()
 
 
@@ -339,6 +346,7 @@ async def http_stream(url, sink, headers=None, timeout=None):
     use_ssl = proto == "https"
     gc.collect()
     reader = writer = None
+    await _net_lock.acquire()
     try:
         conn = asyncio.open_connection(host, port, ssl=use_ssl) if use_ssl \
             else asyncio.open_connection(host, port)
@@ -381,6 +389,7 @@ async def http_stream(url, sink, headers=None, timeout=None):
                 await writer.wait_closed()
             except Exception:
                 pass
+        _net_lock.release()
         gc.collect()
 
 
