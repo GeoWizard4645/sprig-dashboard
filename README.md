@@ -72,7 +72,7 @@ board differs.
 | `gfx_engine.py` | ST7735 driver + framebuffer primitives (`draw_text`, `draw_rect`, sprites) |
 | `wifi_manager.py` | Async Wi-Fi connect + non-blocking HTTP(S)/JSON client |
 | `app_base.py` | Base `App` class and navigation contract |
-| `cache.py` | JSON flash cache (instant boot, survives power cycles) |
+| `store.py` | JSON flash cache (instant boot, survives power cycles) |
 | `weather_app.py` | Open-Meteo integration |
 | `finance_app.py` | Yahoo Finance tickers + drill-down + search |
 | `sports_app.py` | ESPN scoreboard aggregator |
@@ -94,8 +94,8 @@ The dashboard is built to be usable instantly and seamless after a short warm-up
   cadence; a background prefetcher warms all standings (F1 drivers +
   constructors, NFL/NBA/MLB) one league at a time and then **idles once warm**,
   so it doesn't waste power.
-- **Flash cache.** Each app writes its last-known data to `/cache/*.json`
-  (`cache.py`) and reloads it on boot, so subsequent power-ups paint real values
+- **Flash cache.** Each app writes its last-known data to `/cdata/*.json`
+  (`store.py`) and reloads it on boot, so subsequent power-ups paint real values
   instantly and just refresh in the background. Writes are atomic and throttled
   (≥2 min/file) to spare flash.
 - **Placeholders.** Apps ship with built-in placeholder values so the very

@@ -1,16 +1,21 @@
-# cache.py
+# store.py
 # ---------------------------------------------------------------------------
 # Tiny JSON persistence layer on the Pico's flash. Lets each app render
 # last-known values instantly on boot (no blank screens, no waiting) and
 # survive power cycles. Writes are atomic (temp + rename) and throttled to
 # spare the flash from wear.
+#
+# IMPORTANT: the storage directory (_DIR) must NOT share a name with any
+# importable module -- a directory on the flash root shadows a same-named .py,
+# which would make `import store` resolve to the (attribute-less) directory.
+# Hence the module is `store` and the directory is `/cdata`.
 # ---------------------------------------------------------------------------
 
 import json
 import os
 import time
 
-_DIR = "/cache"
+_DIR = "/cdata"
 _MIN_SAVE_MS = 120000      # don't rewrite the same file more than every 2 min
 _last = {}
 

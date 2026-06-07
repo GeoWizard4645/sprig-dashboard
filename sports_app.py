@@ -23,7 +23,7 @@ import gc
 from app_base import App
 from wifi_manager import http_stream, JsonSax
 import config
-import cache
+import store
 
 _SPLIT_Y = 82
 _STATE_ORDER = {"in": 0, "pre": 1, "post": 2}
@@ -159,7 +159,7 @@ class SportsApp(App):
         self.loading = False
         # RAM holds only: the live aggregate (small) + the ONE viewed league's
         # scores and the ONE viewed league's standings. Rest lives on flash.
-        self.live = cache.load("sports_live", []) or []
+        self.live = store.load("sports_live", []) or []
         self.score = []
         self.score_tier = -1
         self.std = None
@@ -212,7 +212,7 @@ class SportsApp(App):
             self.dirty = True
             try:
                 evs = await self._fetch_scores(tier)
-                cache.save("spscore_%d" % tier, evs)
+                store.save("spscore_%d" % tier, evs)
                 if tier == self.score_tier:
                     self.score = evs
                 for ev in evs:
@@ -223,7 +223,7 @@ class SportsApp(App):
                 errs += 1
             gc.collect()
         self.live = live
-        cache.save("sports_live", live)
+        store.save("sports_live", live)
         self.status = "" if live else ("fetch failed" if errs == len(self.tiers) else "nothing live")
 
     async def _refresh_score(self, tier):
@@ -231,7 +231,7 @@ class SportsApp(App):
             self.status = "no wifi"
             return
         evs = await self._fetch_scores(tier)
-        cache.save("spscore_%d" % tier, evs)
+        store.save("spscore_%d" % tier, evs)
         self.score = evs
         self.score_tier = tier
         self.status = ""
@@ -246,7 +246,7 @@ class SportsApp(App):
         kind = "f1" if path.startswith("racing") else "team"
         obj = {"kind": kind, "groups": h.groups}
         self.std_time[tier] = time.ticks_ms()
-        cache.save("spstd_%d" % tier, obj)
+        store.save("spstd_%d" % tier, obj)
         if keep:
             self.std = obj
             self.std_tier = tier
@@ -255,12 +255,12 @@ class SportsApp(App):
     # -- view slots (instant load from flash) ------------------------------
     def _view_scores(self, tier):
         if self.score_tier != tier:
-            self.score = cache.load("spscore_%d" % tier, []) or []
+            self.score = store.load("spscore_%d" % tier, []) or []
             self.score_tier = tier
 
     def _view_std(self, tier):
         if self.std_tier != tier:
-            self.std = cache.load("spstd_%d" % tier, None)
+            self.std = store.load("spstd_%d" % tier, None)
             self.std_tier = tier
 
     def _prime(self):

@@ -16,7 +16,7 @@ import uasyncio as asyncio
 from app_base import App
 from wifi_manager import http_json
 import config
-import cache
+import store
 
 _SEARCH = "__SEARCH__"
 # ribbon cells for the search keyboard
@@ -101,7 +101,7 @@ class FinanceApp(App):
         self.symbols = list(config.FINANCE_PAGE_1) + list(config.FINANCE_PAGE_2)
         self.cursor = 0
         self.top = 0               # viewport scroll offset
-        self.quotes = cache.load("finance", {})   # last-known prices, instant on boot
+        self.quotes = store.load("finance", {})   # last-known prices, instant on boot
         self.state = "list"
         self.detail_sym = None
         self.detail_idx = -1
@@ -166,7 +166,7 @@ class FinanceApp(App):
                 await asyncio.sleep_ms(40)
             self.status = "" if ok else "fetch failed"
         if self.quotes:
-            cache.save("finance", self.quotes)
+            store.save("finance", self.quotes)
         self.dirty = True
 
     async def _load_chart(self):

@@ -9,7 +9,7 @@ import gfx_engine as g
 from app_base import App
 from wifi_manager import http_json
 import config
-import cache
+import store
 
 # shown instantly on the very first boot (before any fetch / cache exists)
 _PLACEHOLDER = {
@@ -40,7 +40,7 @@ class WeatherApp(App):
 
     def __init__(self, gfx, wifi):
         super().__init__(gfx, wifi)
-        self.data = cache.load("weather", _PLACEHOLDER)
+        self.data = store.load("weather", _PLACEHOLDER)
         self.unit = "F" if config.TEMP_UNIT == "fahrenheit" else "C"
 
     async def refresh(self):
@@ -59,7 +59,7 @@ class WeatherApp(App):
             if status == 200 and "current" in data:
                 self.data = data
                 self.status = ""
-                cache.save("weather", data)
+                store.save("weather", data)
             else:
                 self.status = "http %s" % status
         except Exception as e:
