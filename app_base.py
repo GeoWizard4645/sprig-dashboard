@@ -17,6 +17,10 @@ import gfx_engine as g
 class App:
     name = "APP"
     refresh_interval = 0          # seconds between auto refreshes (0 = never)
+    # When True the app is kept fresh in the background even when not on screen
+    # (so data is ready the instant you switch to it). Live-only apps that block
+    # (e.g. wlan.scan) set this False and refresh only while active.
+    background_refresh = True
 
     def __init__(self, gfx, wifi):
         self.gfx = gfx
@@ -24,6 +28,7 @@ class App:
         self.dirty = True         # request a re-render
         self.status = ""          # transient status / error line
         self.last_refresh = 0     # ticks_ms of last successful refresh
+        self.active = False       # True while this app is the one on screen
         # When True, main dispatches I/J/K/L as instant single presses with no
         # double-click detection (so rapid repeats never read as select/back).
         # Used by text-entry screens like the ticker search.

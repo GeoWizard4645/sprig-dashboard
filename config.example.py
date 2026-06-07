@@ -20,7 +20,9 @@ WIND_UNIT = "mph"            # "mph" | "kmh" | "ms" | "kn"
 # Yahoo Finance symbols. ^ and = characters are URL-encoded automatically.
 # NOTE: silver futures is SI=F on Yahoo (SL=F is not a valid symbol).
 FINANCE_PAGE_1 = ["BTC-USD", "SI=F", "CL=F", "^IXIC"]
-FINANCE_PAGE_2 = ["GC=F", "MSTR", "AAPL", "NVDA", "ETH-USD", "MSFT", "JPY=X"]
+# ^GSPC = S&P 500, ^DJI = Dow Jones, QQQ = Nasdaq-100 ETF, SGU=F = futures
+FINANCE_PAGE_2 = ["GC=F", "MSTR", "AAPL", "NVDA", "ETH-USD", "MSFT", "JPY=X",
+                  "^GSPC", "^DJI", "QQQ", "SGU=F"]
 
 # --- Sports app ------------------------------------------------------------
 # Priority tiers (tab order). Each entry: (label, espn_path, focus_team_abbr)

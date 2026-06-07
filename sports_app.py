@@ -1,18 +1,17 @@
 # sports_app.py  (button D)
 # ---------------------------------------------------------------------------
 # Score / standings aggregator over ESPN's public site API (no key).
-# Priority tabs: F1 > NFL > NBA > MLB, with focus teams highlighted
-# (Giants / Knicks / Yankees).
+# Tabs: LIVE (all leagues' in-progress games) + F1 / NFL / NBA / MLB.
 #
-# Behaviour:
-#   - LIVE games are prioritised above everything: events are sorted
-#     in-progress -> scheduled -> final, and the cursor lands on a live game.
-#   - On first open the app scans all leagues and defaults to the highest
-#     priority tier that has a live game. If nothing is live it shows F1
-#     driver standings.
-#   - Layout: top ~60% live scoreboard, bottom ~40% league-wide scores.
-#   - Only the active tab is streamed, to stay within the Pico's RAM budget;
-#     huge (100-350 KB) ESPN payloads are parsed on the fly, never buffered.
+#   J/L      switch tab            I/K      scroll list
+#   dbl I/L  toggle SCORES <-> STANDINGS
+#   dbl J/K  (unused here)
+#
+# - LIVE games are prioritised; events sort in-progress -> scheduled -> final.
+# - Per-league tabs lazy-load only when opened; standings load on first toggle.
+# - All fetches retry with backoff (fixes F1 / ESPN intermittent failures).
+# - Last-known scores + standings are cached to flash for instant boot.
+# - Huge (100-350 KB) ESPN payloads are streamed/parsed, never fully buffered.
 # ---------------------------------------------------------------------------
 
 import gfx_engine as g
@@ -21,14 +20,14 @@ import time
 from app_base import App
 from wifi_manager import http_stream, JsonSax
 import config
+import cache
 
 _SPLIT_Y = 82
 _STATE_ORDER = {"in": 0, "pre": 1, "post": 2}
 
 
 class _Scoreboard:
-    """SAX handler: extract a compact event list from ESPN scoreboard JSON
-    while it streams, so the full payload never lands in RAM."""
+    """SAX handler: compact event list from ESPN scoreboard JSON, streamed."""
     def __init__(self):
         self.events = []
         self.cur = None
@@ -82,56 +81,60 @@ class _Scoreboard:
             self.cur["state"] = val
 
 
-class _F1Standings:
-    """SAX handler: pull driver name / rank / championship points from the
-    235 KB ESPN F1 standings document (Driver Standings child only)."""
+class _Standings:
+    """SAX handler: generic ESPN standings extractor. Works for F1 driver
+    standings (athlete + rank/championshipPts) and team leagues (team
+    abbreviation + wins/losses/ties). Streams the 150-235 KB document."""
+    _WANT = ("rank", "championshipPts", "wins", "losses", "ties", "winpercent")
+
     def __init__(self):
-        self.entries = []
-        self.cur = None
-        self.active = False
-        self.stat_name = None
-        self.stat_val = None
+        self.groups = []
+        self.grp = None
+        self.row = None
+        self.sname = None
+        self.sval = None
 
     def start(self, parent, kind, key):
         if kind != "o":
             return
-        if parent == ("a", "entries") and self.active and len(self.entries) < 25:
-            self.cur = {"name": "", "rank": "", "pts": ""}
-        elif parent == ("a", "stats") and self.cur is not None:
-            self.stat_name = None
-            self.stat_val = None
+        if parent == ("a", "children"):
+            self.grp = {"label": "", "rows": []}
+        elif parent == ("a", "entries") and self.grp is not None:
+            self.row = {"name": "", "stats": {}}
+        elif parent == ("a", "stats") and self.row is not None:
+            self.sname = None
+            self.sval = None
 
     def end(self, parent, kind, key):
         if kind != "o":
             return
-        if parent == ("a", "children"):
-            self.active = False
-        elif parent == ("a", "entries") and self.cur is not None:
-            self.entries.append(self.cur)
-            self.cur = None
-        elif parent == ("a", "stats") and self.cur is not None:
-            if self.stat_name == "rank":
-                self.cur["rank"] = self.stat_val or ""
-            elif self.stat_name == "championshipPts":
-                self.cur["pts"] = self.stat_val or ""
+        if parent == ("a", "children") and self.grp is not None:
+            if self.grp["rows"]:
+                self.groups.append(self.grp)
+            self.grp = None
+        elif parent == ("a", "entries") and self.row is not None:
+            self.grp["rows"].append(self.row)
+            self.row = None
+        elif parent == ("a", "stats") and self.row is not None:
+            if self.sname in self._WANT:
+                self.row["stats"][self.sname] = self.sval or ""
 
     def value(self, stack, key, val):
         top = stack[-1] if stack else None
         par = stack[-2] if len(stack) >= 2 else None
         gp = stack[-3] if len(stack) >= 3 else None
-        if par == ("a", "children") and key == "name":
-            self.active = (val == "Driver Standings")
-            return
-        if not self.active:
-            return
-        if top == ("o", "athlete") and key == "shortName" and gp == ("a", "entries"):
-            if self.cur is not None:
-                self.cur["name"] = val
-        if par == ("a", "stats"):
-            if key == "name":
-                self.stat_name = val
-            elif key == "displayValue":
-                self.stat_val = val
+        if par == ("a", "children") and key == "name" and self.grp is not None \
+                and not self.grp["label"]:
+            self.grp["label"] = val
+        if self.row is not None:
+            if gp == ("a", "entries") and key in ("abbreviation", "shortName") \
+                    and top in (("o", "team"), ("o", "athlete")) and not self.row["name"]:
+                self.row["name"] = val
+            elif par == ("a", "stats"):
+                if key == "name":
+                    self.sname = val
+                elif key == "displayValue":
+                    self.sval = val
 
 
 class SportsApp(App):
@@ -141,15 +144,28 @@ class SportsApp(App):
     def __init__(self, gfx, wifi):
         super().__init__(gfx, wifi)
         self.tiers = config.SPORTS_TIERS
-        # tab 0 == LIVE home (all leagues); tab i>=1 == league tier i-1
         self.labels = ["LIVE"] + [t[0] for t in self.tiers]
         self.tab = 0
         self.cursor = 0
-        self.cache = {}            # tier_idx -> list[event] (live-first)
-        self.live = []             # [(league_label, event)] aggregated live games
-        self.standings = []        # F1 driver standings
         self.std_offset = 0
+        self.mode = "scores"          # "scores" | "standings"
         self.loading = False
+        self.loading_std = False
+        self.active = False
+        # restore last-known data from flash for an instant first paint
+        self.cache = {}
+        for k, v in (cache.load("sports_scores", {}) or {}).items():
+            try:
+                self.cache[int(k)] = v
+            except Exception:
+                pass
+        self.live = cache.load("sports_live", []) or []
+        self.standings = {}
+        for k, v in (cache.load("sports_standings", {}) or {}).items():
+            try:
+                self.standings[int(k)] = v
+            except Exception:
+                pass
 
     def _tier(self):
         return self.tab - 1 if self.tab >= 1 else -1
@@ -161,32 +177,37 @@ class SportsApp(App):
     def _has_live(self, tier):
         return any(e["state"] == "in" for e in self.cache.get(tier, []))
 
-    def _f1_standings_mode(self):
-        return self.tab == 1 and not self._has_live(0) and bool(self.standings)
-
     # -- data ---------------------------------------------------------------
+    async def _stream(self, url, factory, tries=3):
+        last = None
+        for attempt in range(tries):
+            try:
+                h = factory()
+                await http_stream(url, JsonSax(h).feed)
+                return h
+            except Exception as e:
+                last = e
+                await asyncio.sleep_ms(400 * (attempt + 1))
+        raise last
+
     async def _load(self, tier):
         label, path, _f = self.tiers[tier]
         if not await self.wifi.ensure():
             self.status = "no wifi"
-            self.dirty = True
             return
         self.status = "loading %s..." % label
         self.dirty = True
         url = "https://site.api.espn.com/apis/site/v2/sports/%s/scoreboard?limit=40" % path
-        sb = _Scoreboard()
-        await http_stream(url, JsonSax(sb).feed)
-        evs = sb.events
+        h = await self._stream(url, _Scoreboard)
+        evs = h.events
         for ev in evs:
             ev["rows"].sort(key=lambda r: 0 if r[2] == "away" else 1)
             ev["rows"] = [(r[0], r[1]) for r in ev["rows"]]
-        evs.sort(key=lambda e: _STATE_ORDER.get(e["state"], 3))   # live first
+        evs.sort(key=lambda e: _STATE_ORDER.get(e["state"], 3))
         self.cache[tier] = evs
-        if tier == 0 and not self._has_live(0) and not self.standings:
-            asyncio.create_task(self._load_standings())
+        cache.save("sports_scores", {str(k): v for k, v in self.cache.items()})
 
     async def _load_live(self):
-        """Lazily load every league and aggregate the in-progress games."""
         live = []
         errs = 0
         for tier in range(len(self.tiers)):
@@ -198,54 +219,69 @@ class SportsApp(App):
                 if ev["state"] == "in":
                     live.append((self.tiers[tier][0], ev))
         self.live = live
-        if live:
-            self.status = ""
-        elif errs == len(self.tiers):
-            self.status = "fetch failed"
-        else:
-            self.status = "nothing live"
+        cache.save("sports_live", live)
+        self.status = "" if live else ("fetch failed" if errs == len(self.tiers) else "nothing live")
 
-    async def _load_standings(self):
-        url = "https://site.api.espn.com/apis/v2/sports/racing/f1/standings"
-        try:
-            h = _F1Standings()
-            await http_stream(url, JsonSax(h).feed)
-            if h.entries:
-                self.standings = h.entries
-        except Exception as e:
-            self.status = "std err: %s" % e
+    async def _load_standings(self, tier):
+        label, path, _f = self.tiers[tier]
+        if not await self.wifi.ensure():
+            self.status = "no wifi"
+            return
+        self.status = "loading %s table..." % label
         self.dirty = True
+        url = "https://site.api.espn.com/apis/v2/sports/%s/standings" % path
+        h = await self._stream(url, _Standings)
+        kind = "f1" if path.startswith("racing") else "team"
+        groups = h.groups
+        if kind == "f1":
+            groups = [gp for gp in groups if "Driver" in gp["label"]] or groups[:1]
+        self.standings[tier] = {"kind": kind, "groups": groups}
+        cache.save("sports_standings", {str(k): v for k, v in self.standings.items()})
+        self.status = ""
 
     async def refresh(self):
         self.loading = True
         try:
             if self.tab == 0:
-                await self._load_live()
+                # LIVE rescans all leagues only on screen or for the first boot
+                if not (self.live and not self.active):
+                    await self._load_live()
             else:
                 await self._load(self._tier())
                 self.status = ""
         except Exception as e:
-            self.status = "err: %s" % e
+            self.status = "err: %s" % str(e)[:18]
         self.loading = False
         self.dirty = True
 
     def _ensure(self):
-        """Lazy-load whatever the freshly selected tab needs."""
         if self.loading:
             return
         if self.tab == 0:
             if not self.live:
                 self.loading = True
                 asyncio.create_task(self._refresh_task())
-        else:
-            t = self._tier()
-            if t not in self.cache:
-                self.loading = True
-                asyncio.create_task(self._refresh_task())
+        elif self._tier() not in self.cache:
+            self.loading = True
+            asyncio.create_task(self._refresh_task())
+
+    def _ensure_standings(self):
+        t = self._tier()
+        if t >= 0 and t not in self.standings and not self.loading_std:
+            self.loading_std = True
+            asyncio.create_task(self._std_task(t))
 
     async def _refresh_task(self):
         await self.refresh()
-        self.last_refresh = time.ticks_ms()   # keep main's scheduler in sync
+        self.last_refresh = time.ticks_ms()
+
+    async def _std_task(self, tier):
+        try:
+            await self._load_standings(tier)
+        except Exception as e:
+            self.status = "table err"
+        self.loading_std = False
+        self.dirty = True
 
     # -- navigation ---------------------------------------------------------
     def _events(self):
@@ -253,14 +289,14 @@ class SportsApp(App):
         return self.cache.get(t, []) if t >= 0 else []
 
     def _scroll_len(self):
+        if self.mode == "standings":
+            return 0
         if self.tab == 0:
             return len(self.live)
-        if self._f1_standings_mode():
-            return len(self.standings)
         return len(self._events())
 
     def on_up(self):
-        if self._f1_standings_mode():
+        if self.mode == "standings":
             self.std_offset = max(0, self.std_offset - 1)
         else:
             n = self._scroll_len()
@@ -269,46 +305,64 @@ class SportsApp(App):
         self.dirty = True
 
     def on_down(self):
-        if self._f1_standings_mode():
-            self.std_offset = min(max(0, len(self.standings) - 8), self.std_offset + 1)
+        if self.mode == "standings":
+            self.std_offset += 1
         else:
             n = self._scroll_len()
             if n:
                 self.cursor = (self.cursor + 1) % n
         self.dirty = True
 
-    def on_left(self):
-        self.tab = (self.tab - 1) % len(self.labels)
+    def _switch(self, delta):
+        self.tab = (self.tab + delta) % len(self.labels)
         self.cursor = 0
         self.std_offset = 0
-        self._ensure()
+        if self.mode == "standings":
+            self._ensure_standings()
+        else:
+            self._ensure()
         self.dirty = True
+
+    def on_left(self):
+        self._switch(-1)
 
     def on_right(self):
-        self.tab = (self.tab + 1) % len(self.labels)
-        self.cursor = 0
-        self.std_offset = 0
-        self._ensure()
-        self.dirty = True
+        self._switch(1)
 
     def on_select(self):
-        self._ensure()
-        if not self.loading:
-            self.loading = True
-            asyncio.create_task(self._refresh_task())
+        # toggle scores <-> standings
+        self.mode = "standings" if self.mode == "scores" else "scores"
+        self.cursor = 0
+        self.std_offset = 0
+        if self.mode == "standings":
+            self._ensure_standings()
+        else:
+            self._ensure()
         self.dirty = True
 
     def on_enter(self):
+        self.active = True
         self.dirty = True
+        if self.mode == "standings":
+            self._ensure_standings()
+        else:
+            self._ensure()
+
+    def on_exit(self):
+        self.active = False
 
     # -- rendering ----------------------------------------------------------
     def render(self):
         self._tabs()
+        if self.mode == "standings":
+            if self.tab == 0:
+                self.gfx.draw_text("Pick a league (J/L)", 6, _SPLIT_Y - 20, g.GREY)
+                self.gfx.draw_text("for standings", 6, _SPLIT_Y - 8, g.DIM)
+            else:
+                self._render_standings()
+            return
         if self.tab == 0:
             self._live_home()
-            return
-        if self._f1_standings_mode():
-            self._standings()
             return
         events = self._events()
         if not events:
@@ -337,6 +391,9 @@ class SportsApp(App):
             if live and not active:
                 gfx.draw_rect(x + w - 3, y + 1, 2, 2, g.RED, fill=True)
             x += w + 2
+        # mode pill on the far right
+        m = "STBL" if self.mode == "standings" else "SCOR"
+        gfx.draw_text(m, g.WIDTH - 8 * 4 - 1, y + 2, g.ACCENT)
 
     def _live_home(self):
         gfx = self.gfx
@@ -346,7 +403,7 @@ class SportsApp(App):
                 gfx.draw_text("scanning leagues...", 6, y + 8, g.YELLOW)
             else:
                 gfx.draw_text("No games live right now", 6, y + 8, g.GREY)
-                gfx.draw_text("J/L browse leagues", 6, y + 22, g.DIM)
+                gfx.draw_text("J/L browse  dblI/L table", 6, y + 22, g.DIM)
             return
         gfx.draw_text("LIVE NOW  (%d)" % len(self.live), 4, y, g.RED)
         y += 13
@@ -354,9 +411,7 @@ class SportsApp(App):
         rows_fit = (g.HEIGHT - y) // row_h
         if self.cursor >= len(self.live):
             self.cursor = 0
-        start = 0
-        if self.cursor >= rows_fit:
-            start = self.cursor - rows_fit + 1
+        start = max(0, self.cursor - rows_fit + 1) if self.cursor >= rows_fit else 0
         for i in range(start, min(len(self.live), start + rows_fit)):
             lbl, ev = self.live[i]
             sel = (i == self.cursor)
@@ -373,21 +428,56 @@ class SportsApp(App):
             gfx.draw_text(ev["detail"][:30], 4, y + 10, g.RED)
             y += row_h
 
-    def _standings(self):
+    def _std_lines(self, st):
+        out = []
+        if st["kind"] == "f1":
+            for grp in st["groups"]:
+                for r in grp["rows"]:
+                    s = r["stats"]
+                    out.append(("%2s %-13s %4s" % (s.get("rank", ""), r["name"][:13],
+                                                   s.get("championshipPts", "")), False))
+        else:
+            for grp in st["groups"]:
+                out.append((grp["label"][:21], True))
+                for r in grp["rows"]:
+                    s = r["stats"]
+                    rec = "%s-%s" % (s.get("wins", "?"), s.get("losses", "?"))
+                    ti = s.get("ties", "")
+                    if ti and ti != "0":
+                        rec += "-" + ti
+                    out.append(("%-4s %s" % (r["name"][:4], rec), False))
+        return out
+
+    def _render_standings(self):
         gfx = self.gfx
-        y = g.CONTENT_Y + 14
-        gfx.draw_text("F1 DRIVER STANDINGS", 4, y, g.ACCENT)
-        gfx.draw_text("I/K scroll", g.WIDTH - 8 * 10 - 2, y, g.DIM)
+        t = self._tier()
+        st = self.standings.get(t)
+        y = g.CONTENT_Y + 13
+        if st is None:
+            gfx.draw_text(self.status or "loading table...", 6, y + 6, g.YELLOW)
+            return
+        lines = self._std_lines(st)
+        if not lines:
+            gfx.draw_text("no standings", 6, y + 6, g.GREY)
+            return
+        gfx.draw_text("%s TABLE" % self.labels[self.tab], 4, y, g.ACCENT)
+        gfx.draw_text("I/K", g.WIDTH - 8 * 3 - 2, y, g.DIM)
         y += 12
-        rows = self.standings[self.std_offset:self.std_offset + 8]
-        for e in rows:
-            rk = e["rank"]
-            col = g.YELLOW if rk == "1" else g.WHITE
-            gfx.draw_text(rk.rjust(2), 4, y, col)
-            gfx.draw_text(e["name"][:16], 26, y, col)
-            pts = e["pts"]
-            gfx.draw_text(pts, g.WIDTH - 8 * len(pts) - 4, y, g.GREEN)
-            y += 12
+        row_h = 10
+        rows_fit = (g.HEIGHT - y) // row_h
+        if self.std_offset > max(0, len(lines) - rows_fit):
+            self.std_offset = max(0, len(lines) - rows_fit)
+        focus = self._focus()
+        for i in range(self.std_offset, min(len(lines), self.std_offset + rows_fit)):
+            txt, hdr = lines[i]
+            if hdr:
+                gfx.draw_text(txt, 2, y, g.ACCENT)
+            else:
+                col = g.WHITE
+                if focus and txt.startswith(focus):
+                    col = g.YELLOW
+                gfx.draw_text(txt, 6, y, col)
+            y += row_h
 
     def _scoreboard(self, ev):
         gfx = self.gfx
@@ -396,7 +486,7 @@ class SportsApp(App):
         state = ev["state"]
         state_col = g.RED if state == "in" else (g.GREEN if state == "post" else g.YELLOW)
         if state == "in":
-            gfx.draw_text("LIVE", g.WIDTH - 8 * 4 - 3, g.CONTENT_Y + 1, g.RED)
+            gfx.draw_text("LIVE", g.WIDTH - 8 * 4 - 30, g.CONTENT_Y + 1, g.RED)
         rows = ev["rows"]
         if len(rows) >= 2 and len(rows[0][0]) <= 5:
             for idx in range(2):
@@ -421,9 +511,7 @@ class SportsApp(App):
         y = _SPLIT_Y + 2
         row_h = 11
         rows_fit = (g.HEIGHT - y) // row_h
-        start = 0
-        if self.cursor >= rows_fit:
-            start = self.cursor - rows_fit + 1
+        start = self.cursor - rows_fit + 1 if self.cursor >= rows_fit else 0
         for i in range(start, min(len(events), start + rows_fit)):
             ev = events[i]
             sel = (i == self.cursor)

@@ -16,6 +16,7 @@ import uasyncio as asyncio
 from app_base import App
 from wifi_manager import http_json
 import config
+import cache
 
 _SEARCH = "__SEARCH__"
 # ribbon cells for the search keyboard
@@ -100,7 +101,7 @@ class FinanceApp(App):
         self.symbols = list(config.FINANCE_PAGE_1) + list(config.FINANCE_PAGE_2)
         self.cursor = 0
         self.top = 0               # viewport scroll offset
-        self.quotes = {}
+        self.quotes = cache.load("finance", {})   # last-known prices, instant on boot
         self.state = "list"
         self.detail_sym = None
         self.detail_idx = -1
@@ -112,21 +113,61 @@ class FinanceApp(App):
         self.hpos = 0
 
     # -- data ---------------------------------------------------------------
+    async def _spark_all(self):
+        """Fetch every list symbol in ONE request via Yahoo's spark endpoint."""
+        syms = ",".join(_enc(s) for s in self.symbols)
+        last = None
+        for attempt in range(3):
+            host = "query1" if attempt % 2 == 0 else "query2"
+            url = ("https://%s.finance.yahoo.com/v8/finance/spark"
+                   "?symbols=%s&range=1d&interval=15m") % (host, syms)
+            try:
+                status, data = await http_json(url, max_bytes=50000)
+                hit = 0
+                for sym in self.symbols:
+                    d = data.get(sym)
+                    if not d:
+                        continue
+                    closes = [c for c in d.get("close", []) if c is not None]
+                    price = closes[-1] if closes else None
+                    prev = d.get("previousClose") or d.get("chartPreviousClose")
+                    if price is None:
+                        continue
+                    pct = ((price - prev) / prev * 100) if (price and prev) else 0.0
+                    self.quotes[sym] = {"price": price, "prev": prev, "pct": pct}
+                    hit += 1
+                if hit:
+                    return hit
+            except Exception as e:
+                last = e
+            await asyncio.sleep_ms(300 * (attempt + 1))
+        if last:
+            raise last
+        return 0
+
     async def refresh(self):
         if not await self.wifi.ensure():
             self.status = "no wifi"
             self.dirty = True
             return
-        ok = 0
-        for sym in self.symbols:
-            try:
-                self.quotes[sym] = await _fetch(sym)
-                ok += 1
-            except Exception as e:
-                self.quotes.setdefault(sym, {"price": None, "pct": 0, "err": str(e)})
-            self.dirty = True
-            await asyncio.sleep_ms(40)
-        self.status = "" if ok else "fetch failed"
+        try:
+            ok = await self._spark_all()
+            self.status = "" if ok else "fetch failed"
+        except Exception:
+            # spark down -> fall back to per-symbol chart fetches
+            ok = 0
+            for sym in self.symbols:
+                try:
+                    self.quotes[sym] = await _fetch(sym)
+                    ok += 1
+                except Exception as e:
+                    self.quotes.setdefault(sym, {"price": None, "pct": 0, "err": str(e)})
+                self.dirty = True
+                await asyncio.sleep_ms(40)
+            self.status = "" if ok else "fetch failed"
+        if self.quotes:
+            cache.save("finance", self.quotes)
+        self.dirty = True
 
     async def _load_chart(self):
         self._tok += 1

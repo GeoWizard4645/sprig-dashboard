@@ -9,8 +9,8 @@ Four apps, switched with the D-pad cluster:
 | Button | App | What it does |
 |--------|-----|--------------|
 | **W** | Weather | Current temp (large), conditions, 3-day min/max bar chart (Open-Meteo) |
-| **S** | Finance | One scrolling ticker list; drill-down with a **price chart + selectable timeframe** (1D/5D/1M/6M/1Y); single-press ribbon search for any ticker (Yahoo Finance). Fetches retry across query1/query2 hosts to ride out rate-limits |
-| **D** | Sports | **LIVE home** aggregating in-progress games across all leagues, plus per-league tabs (F1/NFL/NBA/MLB, lazy-loaded); **F1 driver standings** when no race is on (ESPN public API) |
+| **S** | Finance | One scrolling ticker list (incl. S&P 500, Dow, QQQ, futures); drill-down with a **price chart + selectable timeframe** (1D/5D/1M/6M/1Y); single-press ribbon search. All list prices fetched in **one** Yahoo *spark* request; fetches retry across query1/query2 hosts |
+| **D** | Sports | **LIVE home** aggregating in-progress games across all leagues + per-league tabs (F1/NFL/NBA/MLB, lazy); **double-tap I/L toggles SCORES ↔ STANDINGS** (driver table for F1, W-L tables for NFL/NBA/MLB). All fetches retry for reliability (ESPN public API) |
 | **A** | Ghost Sniffer | Three J/L views: RF signal histogram + waterfall + open-network count; **2.4 GHz channel-congestion analyzer**; and a **Sprig system monitor** (die temp, CPU clock, RAM/flash, uptime, IP/MAC, RSSI) |
 
 All data sources are **$0-cost, key-free public endpoints**.
@@ -29,7 +29,7 @@ Per-app extras:
 - **Finance list:** I/K scroll all tickers in one list; double-I/L opens detail; the last row is search.
 - **Finance search:** instant single-press (no double-click) — J/L move the ribbon, **I** picks the highlighted key, **K** backspaces; scroll to **OK** to search or **CANCEL** to exit.
 - **Finance detail:** J/L change the chart timeframe, I/K flip to the prev/next ticker without leaving the chart.
-- **Sports:** J/L switch tab — **LIVE** is the home tab (all leagues' live games); a red dot marks tabs with a live game; I/K scroll games or F1 standings.
+- **Sports:** J/L switch tab — **LIVE** is the home tab (all leagues' live games); a red dot marks tabs with a live game. **Double-tap I/L toggles SCORES ↔ STANDINGS** (the pill at top-right shows which). I/K scroll.
 - **Ghost Sniffer:** J/L cycle RF scan → channel analyzer → system monitor; I/K scroll APs in RF view.
 
 ## Hardware pin map
@@ -72,11 +72,30 @@ board differs.
 | `gfx_engine.py` | ST7735 driver + framebuffer primitives (`draw_text`, `draw_rect`, sprites) |
 | `wifi_manager.py` | Async Wi-Fi connect + non-blocking HTTP(S)/JSON client |
 | `app_base.py` | Base `App` class and navigation contract |
+| `cache.py` | JSON flash cache (instant boot, survives power cycles) |
 | `weather_app.py` | Open-Meteo integration |
 | `finance_app.py` | Yahoo Finance tickers + drill-down + search |
 | `sports_app.py` | ESPN scoreboard aggregator |
 | `network_app.py` | "Ghost Sniffer" RSSI visualizer |
 | `config.py` | Local secrets/config (git-ignored) |
+
+## Performance & caching
+
+The dashboard is built to be usable instantly and seamless after a short warm-up:
+
+- **Boot preload.** On power-up every app starts fetching immediately (the
+  active app first, then the rest in the background) — you don't have to open an
+  app to make it load. Initial warm-up is roughly ~10 s on a good connection.
+- **Flash cache.** Each app writes its last-known data to `/cache/*.json`
+  (`cache.py`) and reloads it on boot, so subsequent power-ups paint real values
+  instantly and just refresh in the background. Writes are atomic and throttled
+  (≥2 min/file) to spare flash.
+- **Placeholders.** Apps ship with built-in placeholder values so the very
+  first boot (before any cache exists) is never a blank screen.
+- **Fewer/cheaper requests.** Finance pulls the whole list in one *spark*
+  request; sports streams + parses on the fly (never buffering the 100-350 KB
+  payloads) and only the visible/needed league is fetched. The RF scanner is
+  the only app that doesn't run in the background (its `wlan.scan()` blocks).
 
 ## Design notes & constraints
 

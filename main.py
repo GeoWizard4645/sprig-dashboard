@@ -87,9 +87,11 @@ class Dashboard:
     def switch_app(self, key):
         if key == self.current:
             return
+        self.app.active = False
         self.app.on_exit()
         self.current = key
         self.app = self.apps[key]
+        self.app.active = True
         self.app.on_enter()
         self.app.dirty = True
         self.beep(1400, 22)
@@ -166,22 +168,32 @@ class Dashboard:
             await asyncio.sleep_ms(33)
 
     async def refresh_loop(self):
+        # Keeps EVERY app's data warm (not just the visible one), so switching
+        # apps is instant. The active app gets priority; background-only apps
+        # (e.g. the RF scanner) refresh solely while on screen.
         while True:
-            a = self.app
-            if a.due() and not getattr(a, "loading", False):
-                a.last_refresh = time.ticks_ms()
-                ok = True
-                try:
-                    await a.refresh()
-                except Exception as e:
-                    a.status = "refresh err: %s" % e
-                    a.dirty = True
-                    ok = False
-                gc.collect()
-                st = a.status or ""
-                if (not ok) or ("err" in st) or ("wifi" in st) or ("failed" in st):
-                    a.schedule_retry(15)
-            await asyncio.sleep_ms(500)
+            did = False
+            cands = [self.app]
+            for a in self.apps.values():
+                if a is not self.app and getattr(a, "background_refresh", True):
+                    cands.append(a)
+            for a in cands:
+                if a.due() and not getattr(a, "loading", False):
+                    a.last_refresh = time.ticks_ms()
+                    ok = True
+                    try:
+                        await a.refresh()
+                    except Exception as e:
+                        a.status = "refresh err: %s" % e
+                        a.dirty = True
+                        ok = False
+                    gc.collect()
+                    st = a.status or ""
+                    if (not ok) or ("err" in st) or ("wifi" in st) or ("failed" in st):
+                        a.schedule_retry(15)
+                    did = True
+                    break       # one refresh per pass keeps the UI responsive
+            await asyncio.sleep_ms(60 if did else 500)
 
     async def clock_task(self):
         synced = False
@@ -216,6 +228,7 @@ class Dashboard:
         asyncio.create_task(self.clock_task())
         asyncio.create_task(self.input_loop())
         asyncio.create_task(self.refresh_loop())
+        self.app.active = True
         self.app.on_enter()
         self.app.dirty = True
         await self.render_loop()
