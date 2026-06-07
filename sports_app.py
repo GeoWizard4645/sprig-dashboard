@@ -431,7 +431,7 @@ class SportsApp(App):
                 gfx.draw_rect(x, _SEC_Y, w, 10, g.DIM)
                 gfx.draw_text(key, x + 3, _SEC_Y + 1, g.GREY)
             x += w + 3
-        gfx.draw_text("dblI/L", g.WIDTH - 8 * 6 - 1, _SEC_Y + 1, g.DIM)
+        gfx.draw_text("I/L", g.WIDTH - 8 * 3 - 1, _SEC_Y + 1, g.DIM)
         # row 2: league tabs
         x = 1
         for i, label in enumerate(self.labels):
@@ -488,6 +488,9 @@ class SportsApp(App):
         return r.get("abbr") or r.get("short") or "?"
 
     def _std_lines(self, st):
+        """Return rows as structured tuples so the renderer can column-align
+        them to the 160px width: ("H", header) | ("F", rank, name, pts) |
+        ("T", name, record)."""
         out = []
         kind = st["kind"]
         for grp in st["groups"]:
@@ -497,19 +500,19 @@ class SportsApp(App):
                     "CONSTRUCTORS" if "Constructor" in lbl else lbl.upper())
             else:
                 hdr = lbl
-            out.append((hdr, True))
+            out.append(("H", hdr))
             for r in grp["rows"]:
                 s = r["stats"]
                 name = self._name(kind, r)
                 if kind == "f1":
-                    pts = s.get("championshipPts") or s.get("points") or ""
-                    out.append(("%2s %-12s %4s" % (s.get("rank", ""), name[:12], pts), False))
+                    pts = str(s.get("championshipPts") or s.get("points") or "")
+                    out.append(("F", s.get("rank", ""), name, pts))
                 else:
                     rec = "%s-%s" % (s.get("wins", "?"), s.get("losses", "?"))
                     ti = s.get("ties", "")
                     if ti and ti != "0":
                         rec += "-" + ti
-                    out.append(("%-4s %s" % (name[:4], rec), False))
+                    out.append(("T", name, rec))
         return out
 
     def _render_standings(self):
@@ -532,12 +535,20 @@ class SportsApp(App):
             self.std_offset = max(0, len(lines) - rows_fit)
         focus = self._focus()
         for i in range(self.std_offset, min(len(lines), self.std_offset + rows_fit)):
-            txt, hdr = lines[i]
-            if hdr:
-                gfx.draw_text(txt, 2, y, g.ACCENT)
+            row = lines[i]
+            if row[0] == "H":
+                gfx.draw_text(row[1], 2, y, g.ACCENT, max_w=152)
+            elif row[0] == "F":
+                _, rank, name, pts = row
+                col = g.YELLOW if rank == "1" else g.WHITE
+                gfx.draw_text("%2s" % rank, 2, y, col)              # rank
+                gfx.draw_text(pts, 156 - 8 * len(pts), y, g.GREEN)  # points, right-aligned
+                gfx.draw_text(name, 24, y, col, max_w=156 - 8 * len(pts) - 27)
             else:
-                col = g.YELLOW if (focus and txt.startswith(focus)) else g.WHITE
-                gfx.draw_text(txt, 6, y, col)
+                _, name, rec = row
+                col = g.YELLOW if (focus and name == focus) else g.WHITE
+                gfx.draw_text(name, 4, y, col, max_w=40)
+                gfx.draw_text(rec, 50, y, g.WHITE, max_w=108)
             y += row_h
         if self.std_offset > 0:
             gfx.draw_text("^", g.WIDTH - 9, _BODY_Y + 12, g.ACCENT)

@@ -346,12 +346,15 @@ class FinanceApp(App):
                 gfx.draw_text("[ + SEARCH TICKER ]", 6, y, g.ACCENT if sel else g.GREY)
             else:
                 q = self.quotes.get(item)
-                gfx.draw_text(_label(item), 6, y, g.WHITE if sel else g.GREY)
+                # 3 columns sized to the 160px width: label | price | %change
+                gfx.draw_text(_label(item), 3, y, g.WHITE if sel else g.GREY, max_w=36)
                 if q and q.get("price") is not None:
-                    gfx.draw_text(_fmt(q["price"]), 60, y, g.WHITE)
+                    pstr = _fmt(q["price"])
+                    gfx.draw_text(pstr, 98 - 8 * len(pstr), y, g.WHITE)
                     pct = q.get("pct", 0)
-                    col = g.GREEN if pct >= 0 else g.RED
-                    gfx.draw_text("%s%.2f%%" % ("+" if pct >= 0 else "", pct), 112, y, col)
+                    pstr2 = "%+.1f%%" % pct
+                    gfx.draw_text(pstr2, 156 - 8 * len(pstr2), y,
+                                 g.GREEN if pct >= 0 else g.RED)
                 else:
                     gfx.draw_text("...", 60, y, g.DIM)
             y += row_h
@@ -437,7 +440,8 @@ class FinanceApp(App):
             pc = g.GREEN if ppct >= 0 else g.RED
             txt = "%s %s%.1f%%" % (_TFS[self.tf][0], "+" if ppct >= 0 else "", ppct)
             gfx.draw_text(txt, g.WIDTH - 8 * len(txt) - 5, cy + 2, pc, bg=g.PANEL)
-        s = "H%s L%s Prev%s" % (_fmt(q.get("high")), _fmt(q.get("low")), _fmt(q.get("prev")))
+        # range hi/lo for the selected timeframe (prev close is the dotted baseline)
+        s = "%s H%s L%s" % (_TFS[self.tf][0], _fmt(q.get("high")), _fmt(q.get("low")))
         gfx.draw_text(s, 3, g.HEIGHT - 9, g.GREY)
 
     def _render_search(self):

@@ -92,8 +92,8 @@ class WeatherApp(App):
         f = "--" if feels is None else "%d" % round(feels)
         h = "--" if hum is None else "%d" % round(hum)
         w = "--" if wind is None else "%d" % round(wind)
-        gfx.draw_text("Feels %s%s  H%s%%  W%s" % (f, self.unit, h, w),
-                     6, g.CONTENT_Y + 56, g.GREY)
+        gfx.draw_text("Feels %s%s H%s%% W%s" % (f, self.unit, h, w),
+                     4, g.CONTENT_Y + 56, g.GREY)
 
         # --- 3-day min/max range chart ---
         self._chart(daily)

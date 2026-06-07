@@ -206,13 +206,16 @@ class NetworkApp(App):
             col = g.RED if c >= 3 else (g.YELLOW if c == 2 else (g.GREEN if c == 1 else g.DIM))
             bh = int(h * c / peak)
             gfx.draw_rect(x, base - bh, cw - 2, bh, col, fill=True)
-            gfx.draw_text(str(ch), x, base + 2, g.GREY)
+            # only label the non-overlapping reference channels (2-digit labels
+            # don't fit a 12px column); bar position conveys the rest
+            if ch in (1, 6, 11):
+                gfx.draw_text(str(ch), x, base + 2, g.WHITE)
             if c:
                 gfx.draw_text(str(c), x, base - bh - 9, g.WHITE)
         busiest = counts.index(peak) if peak else 0
         # recommend the emptiest of the non-overlapping channels 1/6/11
         clear = min((1, 6, 11), key=lambda c: counts[c])
-        gfx.draw_text("busiest CH%d  use CH%d" % (busiest, clear),
+        gfx.draw_text("max CH%d  use CH%d" % (busiest, clear),
                      4, g.HEIGHT - 10, g.ACCENT)
 
     # --- system telemetry view ---
@@ -263,7 +266,7 @@ class NetworkApp(App):
             pass
         y += 12
         up = time.ticks_diff(time.ticks_ms(), self.boot) // 1000
-        gfx.draw_text("UP   %d:%02d:%02d" % (up // 3600, (up % 3600) // 60, up % 60),
+        gfx.draw_text("UP  %d:%02d:%02d" % (up // 3600, (up % 3600) // 60, up % 60),
                      4, y, g.GREY)
         y += 10
         wlan = self.wifi.wlan
@@ -271,18 +274,19 @@ class NetworkApp(App):
             ip = wlan.ifconfig()[0]
         except Exception:
             ip = "0.0.0.0"
-        gfx.draw_text("IP   %s" % ip, 4, y, g.GREY)
+        gfx.draw_text("IP  %s" % ip, 4, y, g.GREY)
         y += 10
         try:
-            mac = _binascii.hexlify(wlan.config("mac"), ":").decode()
+            # no-colon hex keeps the 12-char MAC + label within 160px
+            mac = _binascii.hexlify(wlan.config("mac")).decode()
         except Exception:
             mac = "--"
-        gfx.draw_text("MAC  %s" % mac, 4, y, g.GREY)
+        gfx.draw_text("MAC %s" % mac, 4, y, g.GREY)
         y += 10
         try:
             rssi = wlan.status("rssi")
             ssid = wlan.config("essid")
-            gfx.draw_text("NET  %s %ddBm" % (ssid[:9], rssi), 4, y,
+            gfx.draw_text("NET %s %ddBm" % (ssid[:7], rssi), 4, y,
                          _bar_color(_frac(rssi)))
         except Exception:
-            gfx.draw_text("NET  offline", 4, y, g.RED)
+            gfx.draw_text("NET offline", 4, y, g.RED)
