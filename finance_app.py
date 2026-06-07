@@ -2,14 +2,13 @@
 # ---------------------------------------------------------------------------
 # Ticker dashboard backed by Yahoo Finance's public v8 chart endpoint
 # (no key, no crumb required).
-#   - Two pages of symbols with live price + % change
-#   - Drill-down detail with a price CHART and selectable timeframe
-#     (1D / 5D / 1M / 6M / 1Y), plus % change and day high/low
-#   - Cursor-based character selector for searching any custom ticker
+#   - ONE scrolling list of all tickers (I/K scroll, viewport auto-follows)
+#   - Drill-down detail with a price CHART + selectable timeframe
+#     (1D/5D/1M/6M/1Y); J/L change timeframe, I/K browse tickers
+#   - Single-press ribbon search for any custom ticker (no double-click traps)
 #
-# States: "list" -> "detail" / "search"
-# Detail nav:  J/L = change timeframe   I/K = prev/next ticker
-#              dbl I/L = refresh         dbl J/K = back
+# Yahoo occasionally rate-limits a symbol (AAPL flaking in/out): _fetch retries
+# with backoff and alternates the query1/query2 hosts.
 # ---------------------------------------------------------------------------
 
 import gfx_engine as g
@@ -19,7 +18,8 @@ from wifi_manager import http_json
 import config
 
 _SEARCH = "__SEARCH__"
-_CHARSET = "ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789-=^.&"
+# ribbon cells for the search keyboard
+_RIBBON = list("ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789-=^.&") + ["DEL", "OK", "CANCEL"]
 
 # (label, range, interval)
 _TFS = [("1D", "1d", "15m"), ("5D", "5d", "60m"), ("1M", "1mo", "1d"),
@@ -50,31 +50,44 @@ def _fmt(p):
     return "%.4f" % p
 
 
-async def _fetch(sym, rng="1d", itv="15m", want_closes=False):
-    url = ("https://query1.finance.yahoo.com/v8/finance/chart/%s"
-           "?range=%s&interval=%s") % (_enc(sym), rng, itv)
-    status, data = await http_json(url, max_bytes=45000)
-    res = data["chart"]["result"][0]
-    meta = res["meta"]
-    price = meta.get("regularMarketPrice")
-    prev = meta.get("chartPreviousClose") or meta.get("previousClose")
-    high = meta.get("regularMarketDayHigh")
-    low = meta.get("regularMarketDayLow")
-    closes = []
-    if want_closes or high is None or low is None:
+async def _fetch(sym, rng="1d", itv="15m", want_closes=False, tries=3):
+    last = None
+    for attempt in range(tries):
+        host = "query1" if attempt % 2 == 0 else "query2"
+        url = ("https://%s.finance.yahoo.com/v8/finance/chart/%s"
+               "?range=%s&interval=%s") % (host, _enc(sym), rng, itv)
         try:
-            q = res["indicators"]["quote"][0]
-            closes = [x for x in q.get("close", []) if x is not None]
-            if closes:
-                if high is None:
-                    high = max(closes)
-                if low is None:
-                    low = min(closes)
-        except Exception:
-            pass
-    pct = ((price - prev) / prev * 100) if (price and prev) else 0.0
-    return {"price": price, "prev": prev, "high": high, "low": low,
-            "pct": pct, "closes": closes}
+            status, data = await http_json(url, max_bytes=45000)
+            ch = data.get("chart", {})
+            if ch.get("error"):
+                raise ValueError(ch["error"].get("description", "error"))
+            res = ch["result"][0]
+            meta = res["meta"]
+            price = meta.get("regularMarketPrice")
+            prev = meta.get("chartPreviousClose") or meta.get("previousClose")
+            high = meta.get("regularMarketDayHigh")
+            low = meta.get("regularMarketDayLow")
+            closes = []
+            if want_closes or high is None or low is None:
+                try:
+                    q = res["indicators"]["quote"][0]
+                    closes = [x for x in q.get("close", []) if x is not None]
+                    if closes:
+                        if high is None:
+                            high = max(closes)
+                        if low is None:
+                            low = min(closes)
+                except Exception:
+                    pass
+            if price is None:
+                raise ValueError("no price")
+            pct = ((price - prev) / prev * 100) if (price and prev) else 0.0
+            return {"price": price, "prev": prev, "high": high, "low": low,
+                    "pct": pct, "closes": closes}
+        except Exception as e:
+            last = e
+            await asyncio.sleep_ms(300 * (attempt + 1))
+    raise last
 
 
 class FinanceApp(App):
@@ -83,19 +96,20 @@ class FinanceApp(App):
 
     def __init__(self, gfx, wifi):
         super().__init__(gfx, wifi)
-        self.pages = [list(config.FINANCE_PAGE_1), list(config.FINANCE_PAGE_2)]
-        self.page = 0
+        # one combined, scrolling list
+        self.symbols = list(config.FINANCE_PAGE_1) + list(config.FINANCE_PAGE_2)
         self.cursor = 0
+        self.top = 0               # viewport scroll offset
         self.quotes = {}
         self.state = "list"
         self.detail_sym = None
         self.detail_idx = -1
         self.tf = 0
-        self.chart = None          # dict for current sym+tf, or None while loading
+        self.chart = None
         self._tok = 0
-        # search state
-        self.query = ["A"]
-        self.qpos = 0
+        # search ribbon
+        self.query = ""
+        self.hpos = 0
 
     # -- data ---------------------------------------------------------------
     async def refresh(self):
@@ -104,7 +118,7 @@ class FinanceApp(App):
             self.dirty = True
             return
         ok = 0
-        for sym in self.pages[0] + self.pages[1]:
+        for sym in self.symbols:
             try:
                 self.quotes[sym] = await _fetch(sym)
                 ok += 1
@@ -124,7 +138,7 @@ class FinanceApp(App):
         self.dirty = True
         try:
             data = await _fetch(sym, rng, itv, want_closes=True)
-            if tok == self._tok:        # ignore stale loads
+            if tok == self._tok:
                 self.chart = data
         except Exception as e:
             if tok == self._tok:
@@ -136,13 +150,14 @@ class FinanceApp(App):
         self.detail_idx = idx
         self.tf = 0
         self.state = "detail"
+        self.raw_input = False
         asyncio.create_task(self._load_chart())
 
     async def _search_now(self, sym):
         self.status = "searching %s..." % sym
         self.dirty = True
         try:
-            await _fetch(sym)            # validate the symbol exists
+            await _fetch(sym)
             self._open_detail(sym, -1)
             self.status = ""
         except Exception:
@@ -151,80 +166,84 @@ class FinanceApp(App):
 
     # -- navigation ---------------------------------------------------------
     def _items(self):
-        return self.pages[self.page] + [_SEARCH]
+        return self.symbols + [_SEARCH]
+
+    def _scroll_into_view(self, rows_fit):
+        if self.cursor < self.top:
+            self.top = self.cursor
+        elif self.cursor >= self.top + rows_fit:
+            self.top = self.cursor - rows_fit + 1
 
     def on_up(self):
         if self.state == "list":
             self.cursor = (self.cursor - 1) % len(self._items())
         elif self.state == "detail":
-            syms = self.pages[self.page]
-            if self.detail_idx >= 0 and syms:
-                self.detail_idx = (self.detail_idx - 1) % len(syms)
-                self._open_detail(syms[self.detail_idx], self.detail_idx)
+            if self.detail_idx >= 0 and self.symbols:
+                self.detail_idx = (self.detail_idx - 1) % len(self.symbols)
+                self._open_detail(self.symbols[self.detail_idx], self.detail_idx)
         elif self.state == "search":
-            i = _CHARSET.find(self.query[self.qpos])
-            self.query[self.qpos] = _CHARSET[(i + 1) % len(_CHARSET)]
+            self._activate()
         self.dirty = True
 
     def on_down(self):
         if self.state == "list":
             self.cursor = (self.cursor + 1) % len(self._items())
         elif self.state == "detail":
-            syms = self.pages[self.page]
-            if self.detail_idx >= 0 and syms:
-                self.detail_idx = (self.detail_idx + 1) % len(syms)
-                self._open_detail(syms[self.detail_idx], self.detail_idx)
+            if self.detail_idx >= 0 and self.symbols:
+                self.detail_idx = (self.detail_idx + 1) % len(self.symbols)
+                self._open_detail(self.symbols[self.detail_idx], self.detail_idx)
         elif self.state == "search":
-            i = _CHARSET.find(self.query[self.qpos])
-            self.query[self.qpos] = _CHARSET[(i - 1) % len(_CHARSET)]
+            self.query = self.query[:-1]      # backspace
         self.dirty = True
 
     def on_left(self):
-        if self.state == "list":
-            self.page = (self.page - 1) % len(self.pages)
-            self.cursor = 0
-        elif self.state == "detail":
+        if self.state == "detail":
             self.tf = (self.tf - 1) % len(_TFS)
             asyncio.create_task(self._load_chart())
-        elif self.state == "search" and self.qpos > 0:
-            self.qpos -= 1
+        elif self.state == "search":
+            self.hpos = (self.hpos - 1) % len(_RIBBON)
         self.dirty = True
 
     def on_right(self):
-        if self.state == "list":
-            self.page = (self.page + 1) % len(self.pages)
-            self.cursor = 0
-        elif self.state == "detail":
+        if self.state == "detail":
             self.tf = (self.tf + 1) % len(_TFS)
             asyncio.create_task(self._load_chart())
         elif self.state == "search":
-            if self.qpos < len(self.query) - 1:
-                self.qpos += 1
-            elif len(self.query) < 8:
-                self.query.append("A")
-                self.qpos += 1
+            self.hpos = (self.hpos + 1) % len(_RIBBON)
         self.dirty = True
+
+    def _activate(self):
+        cell = _RIBBON[self.hpos]
+        if cell == "DEL":
+            self.query = self.query[:-1]
+        elif cell == "CANCEL":
+            self.state = "list"
+            self.raw_input = False
+        elif cell == "OK":
+            sym = self.query.strip()
+            if sym:
+                asyncio.create_task(self._search_now(sym))
+        elif len(self.query) < 10:
+            self.query += cell
 
     def on_select(self):
         if self.state == "list":
             item = self._items()[self.cursor]
             if item == _SEARCH:
                 self.state = "search"
-                self.query = ["A"]
-                self.qpos = 0
+                self.query = ""
+                self.hpos = 0
+                self.raw_input = True       # switch to instant single-press mode
             else:
                 self._open_detail(item, self.cursor)
         elif self.state == "detail":
-            asyncio.create_task(self._load_chart())     # refresh
-        elif self.state == "search":
-            sym = "".join(self.query).strip()
-            if sym:
-                asyncio.create_task(self._search_now(sym))
+            asyncio.create_task(self._load_chart())
         self.dirty = True
 
     def on_back(self):
         if self.state in ("detail", "search"):
             self.state = "list"
+            self.raw_input = False
         self.dirty = True
 
     # -- rendering ----------------------------------------------------------
@@ -239,12 +258,15 @@ class FinanceApp(App):
     def _render_list(self):
         gfx = self.gfx
         items = self._items()
-        y = g.CONTENT_Y + 2
-        gfx.draw_text("PAGE %d/%d" % (self.page + 1, len(self.pages)), 4, y, g.ACCENT)
-        gfx.draw_text("J/L page", g.WIDTH - 8 * 8 - 2, y, g.DIM)
-        y += 12
+        gfx.draw_text("MARKETS  %d" % len(self.symbols), 4, g.CONTENT_Y, g.ACCENT)
+        gfx.draw_text("I/K", g.WIDTH - 8 * 3 - 2, g.CONTENT_Y, g.DIM)
+        y0 = g.CONTENT_Y + 12
         row_h = 13
-        for i, item in enumerate(items):
+        rows_fit = (g.HEIGHT - y0) // row_h
+        self._scroll_into_view(rows_fit)
+        y = y0
+        for i in range(self.top, min(len(items), self.top + rows_fit)):
+            item = items[i]
             sel = (i == self.cursor)
             if sel:
                 gfx.draw_rect(0, y - 2, g.WIDTH, row_h, g.PANEL, fill=True)
@@ -262,6 +284,12 @@ class FinanceApp(App):
                 else:
                     gfx.draw_text("...", 60, y, g.DIM)
             y += row_h
+        # scrollbar
+        n = len(items)
+        if n > rows_fit:
+            bar_h = max(6, (g.HEIGHT - y0) * rows_fit // n)
+            bar_y = y0 + (g.HEIGHT - y0 - bar_h) * self.top // (n - rows_fit)
+            gfx.draw_rect(g.WIDTH - 2, bar_y, 2, bar_h, g.ACCENT, fill=True)
         if self.status:
             gfx.draw_text(self.status, 4, g.HEIGHT - 9, g.YELLOW)
 
@@ -271,8 +299,7 @@ class FinanceApp(App):
         for i, tf in enumerate(_TFS):
             label = tf[0]
             w = 8 * len(label) + 4
-            active = (i == self.tf)
-            if active:
+            if i == self.tf:
                 gfx.draw_rect(x, y, w, 11, g.ACCENT, fill=True)
                 gfx.draw_text(label, x + 2, y + 2, g.BLACK)
             else:
@@ -292,7 +319,6 @@ class FinanceApp(App):
         rng = (hi - lo) or 1
         n = len(pts)
         col = g.GREEN if pts[-1] >= pts[0] else g.RED
-        # dotted baseline at the first price (open reference)
         base_y = y + h - 1 - int((pts[0] - lo) / rng * (h - 2))
         for bx in range(x + 1, x + w - 1, 4):
             gfx.pixel(bx, base_y, g.DIM)
@@ -313,7 +339,7 @@ class FinanceApp(App):
         y = g.CONTENT_Y + 2
         gfx.draw_text(_label(sym), 4, y, g.ACCENT, scale=2)
         if q is None:
-            gfx.draw_text("loading...", g.WIDTH - 8 * 10 - 2, y + 4, g.YELLOW)
+            gfx.draw_text("loading", g.WIDTH - 8 * 7 - 2, y + 4, g.YELLOW)
             self._tf_tabs(y + 22)
             if self.status:
                 gfx.draw_text(self.status, 4, g.HEIGHT - 9, g.YELLOW)
@@ -323,7 +349,6 @@ class FinanceApp(App):
         col = g.GREEN if pct >= 0 else g.RED
         gfx.draw_text(_fmt(price), g.WIDTH - 8 * len(_fmt(price)) - 2, y, g.WHITE, scale=2)
         gfx.draw_text("%s%.2f%% day" % ("+" if pct >= 0 else "", pct), 4, y + 18, col)
-        # period change from the chart series
         closes = q.get("closes", [])
         if len(closes) >= 2 and closes[0]:
             ppct = (closes[-1] - closes[0]) / closes[0] * 100
@@ -332,26 +357,36 @@ class FinanceApp(App):
             gfx.draw_text(txt, g.WIDTH - 8 * len(txt) - 2, y + 18, pc)
         self._tf_tabs(y + 28)
         self._draw_chart(closes, 2, y + 42, g.WIDTH - 4, 52)
-        # stat footer
-        s = "H %s  L %s  Prev %s" % (_fmt(q.get("high")), _fmt(q.get("low")), _fmt(q.get("prev")))
+        s = "H %s L %s Prev %s" % (_fmt(q.get("high")), _fmt(q.get("low")), _fmt(q.get("prev")))
         gfx.draw_text(s, 3, g.HEIGHT - 9, g.GREY)
 
     def _render_search(self):
         gfx = self.gfx
-        y = g.CONTENT_Y + 6
-        gfx.draw_text("SEARCH TICKER", 6, y, g.ACCENT)
-        gfx.draw_text("I/K char  J/L move", 6, y + 10, g.DIM)
-        cx = 8
-        cy = y + 30
-        for i, ch in enumerate(self.query):
-            sel = (i == self.qpos)
-            gfx.draw_rect(cx, cy, 16, 22, g.ACCENT if sel else g.DIM)
-            gfx.draw_text(ch, cx + 4, cy + 7, g.WHITE if sel else g.GREY)
+        y = g.CONTENT_Y + 4
+        gfx.draw_text("SEARCH", 4, y, g.ACCENT)
+        # typed query
+        shown = self.query + "_"
+        gfx.draw_text(shown, 4, y + 14, g.WHITE, scale=2)
+        # windowed ribbon centered on highlight
+        cy = y + 44
+        win = 9
+        half = win // 2
+        gfx.draw_text("J/L move   I pick   K bksp", 4, cy - 11, g.DIM)
+        cx = 4
+        for off in range(-half, half + 1):
+            idx = (self.hpos + off) % len(_RIBBON)
+            cell = _RIBBON[idx]
+            txt = cell if len(cell) > 1 else cell
+            sel = (off == 0)
+            w = 8 * len(txt) + 4
             if sel:
-                gfx.draw_text("^", cx + 4, cy + 24, g.ACCENT)
-                gfx.draw_text("v", cx + 4, cy - 9, g.ACCENT)
-            cx += 19
-        gfx.draw_text("dbl I/L = search", 6, g.HEIGHT - 20, g.GREY)
-        gfx.draw_text("dbl J/K = cancel", 6, g.HEIGHT - 10, g.GREY)
+                gfx.draw_rect(cx, cy, w, 13, g.ACCENT, fill=True)
+                gfx.draw_text(txt, cx + 2, cy + 3, g.BLACK)
+            else:
+                gfx.draw_text(txt, cx + 2, cy + 3, g.GREY)
+            cx += w + 2
+            if cx > g.WIDTH - 6:
+                break
+        gfx.draw_text("scroll to OK to search", 4, g.HEIGHT - 10, g.GREY)
         if self.status:
-            gfx.draw_text(self.status, 6, cy + 32, g.YELLOW)
+            gfx.draw_text(self.status, 4, g.HEIGHT - 20, g.YELLOW)

@@ -1,16 +1,18 @@
 # network_app.py  (button A)  --  "Ghost Sniffer"
 # ---------------------------------------------------------------------------
-# Surprise project: a live WLAN signal visualizer AND a Sprig system monitor.
+# Surprise project: a Wi-Fi recon tool + Sprig system monitor.  J/L cycle
+# between three views:
 #
-#   J / L  toggles between two views:
-#     * RF SCAN : live histogram of nearby AP signal strength + a scrolling
-#                 "peak signal" waterfall (from wlan.scan()).
-#     * SYSTEM  : real-time Sprig telemetry -- RP2040 die temperature, CPU
-#                 clock, RAM & flash usage bars, uptime, IP / MAC and the
-#                 connected AP's RSSI.
-#   I / K  scroll the AP list (RF view).
+#   RF SCAN  : live histogram of nearby AP signal strength, a scrolling
+#              "peak signal" waterfall, and open/hidden network counts.
+#   CHANNELS : 2.4 GHz channel-congestion analyzer -- AP count per channel,
+#              busiest channel, and a recommended clear channel.
+#   SYSTEM   : Sprig telemetry -- RP2040 die temp, CPU clock, RAM & flash
+#              usage bars, uptime, IP / MAC, connected-AP RSSI.
 #
-# Note: wlan.scan() blocks ~1-2s; it only runs while the RF view is active.
+#   I/K scroll the AP list (RF view).
+#
+# Note: wlan.scan() blocks ~1-2s; it only runs for the RF / CHANNELS views.
 # ---------------------------------------------------------------------------
 
 import gfx_engine as g
@@ -28,6 +30,7 @@ except ImportError:
 
 _SEC = {0: "OPEN", 1: "WEP", 2: "WPA", 3: "WPA2", 4: "WPA/2", 5: "WPA3", 7: "WPA2-E"}
 _TEMP_ADC = machine.ADC(4)
+_VIEWS = ("scan", "channels", "sys")
 
 
 def _frac(rssi):
@@ -59,15 +62,18 @@ class NetworkApp(App):
 
     def __init__(self, gfx, wifi):
         super().__init__(gfx, wifi)
-        self.view = "scan"        # "scan" | "sys"
-        self.aps = []
+        self.vi = 0
+        self.aps = []             # (ssid, channel, rssi, security)
         self.cursor = 0
         self.history = []
         self.boot = time.ticks_ms()
 
+    def _view(self):
+        return _VIEWS[self.vi]
+
     async def refresh(self):
-        if self.view != "scan":
-            self.dirty = True     # keep telemetry ticking; skip the heavy scan
+        if self._view() == "sys":
+            self.dirty = True     # telemetry only; skip the heavy scan
             return
         wlan = self.wifi.wlan
         try:
@@ -94,45 +100,59 @@ class NetworkApp(App):
 
     # -- navigation ---------------------------------------------------------
     def on_left(self):
-        self.view = "sys" if self.view == "scan" else "scan"
+        self.vi = (self.vi - 1) % len(_VIEWS)
         self.dirty = True
 
     def on_right(self):
-        self.on_left()
+        self.vi = (self.vi + 1) % len(_VIEWS)
+        self.dirty = True
 
     def on_up(self):
-        if self.view == "scan" and self.aps:
+        if self._view() == "scan" and self.aps:
             self.cursor = (self.cursor - 1) % len(self.aps)
         self.dirty = True
 
     def on_down(self):
-        if self.view == "scan" and self.aps:
+        if self._view() == "scan" and self.aps:
             self.cursor = (self.cursor + 1) % len(self.aps)
         self.dirty = True
 
     # -- rendering ----------------------------------------------------------
     def render(self):
-        if self.view == "sys":
+        v = self._view()
+        if v == "sys":
             self._render_sys()
+        elif v == "channels":
+            self._render_channels()
         else:
             self._render_scan()
+
+    def _hint(self, label):
+        self.gfx.draw_text(label, g.WIDTH - 8 * len(label) - 2, g.CONTENT_Y, g.DIM)
 
     # --- RF scanner view ---
     def _render_scan(self):
         gfx = self.gfx
+        n_open = sum(1 for a in self.aps if a[3] == 0)
         gfx.draw_text("RF SCAN  %s" % (self.status or "..."), 4, g.CONTENT_Y, g.ACCENT)
-        gfx.draw_text("J/L:sys", g.WIDTH - 8 * 7 - 2, g.CONTENT_Y, g.DIM)
+        self._hint("J/L>chan")
         if not self.aps:
             gfx.draw_text("scanning air...", 6, g.HEIGHT // 2, g.GREY)
             return
         self._histogram()
-        self._detail()
+        ssid, ch, rssi, sec = self.aps[self.cursor]
+        y = g.CONTENT_Y + 54
+        gfx.draw_text(ssid[:20], 4, y, g.WHITE)
+        gfx.draw_text("CH%-3d %4ddBm %s" % (ch, rssi, _SEC.get(sec, "?")),
+                     4, y + 10, _bar_color(_frac(rssi)))
+        oc = g.RED if n_open else g.GREEN
+        gfx.draw_text("open:%d" % n_open, g.WIDTH - 8 * 7, y + 10, oc)
         self._waterfall()
 
     def _histogram(self):
         gfx = self.gfx
         top = g.CONTENT_Y + 12
-        h = 40
+        h = 38
         n = min(len(self.aps), 13)
         bw = g.WIDTH // 13
         for i in range(n):
@@ -144,18 +164,10 @@ class NetworkApp(App):
             gfx.vbar(x, top, bw - 2, h, f, _bar_color(f))
         gfx.hline(0, top + h + 1, g.WIDTH, g.DIM)
 
-    def _detail(self):
-        gfx = self.gfx
-        ssid, ch, rssi, sec = self.aps[self.cursor]
-        y = g.CONTENT_Y + 56
-        gfx.draw_text(ssid[:18], 4, y, g.WHITE)
-        gfx.draw_text("CH%-3d %4ddBm %s" % (ch, rssi, _SEC.get(sec, "?")),
-                     4, y + 10, _bar_color(_frac(rssi)))
-
     def _waterfall(self):
         gfx = self.gfx
         base = g.HEIGHT - 2
-        top = g.HEIGHT - 22
+        top = g.HEIGHT - 20
         h = base - top
         gfx.draw_rect(0, top - 1, g.WIDTH, h + 2, g.PANEL, fill=True)
         gfx.draw_text("PEAK", 2, top - 9, g.DIM)
@@ -169,6 +181,38 @@ class NetworkApp(App):
                 gfx.line(x - 1, prev, x, yv, g.ACCENT)
             gfx.pixel(x, yv, g.WHITE)
             prev = yv
+
+    # --- channel congestion view ---
+    def _render_channels(self):
+        gfx = self.gfx
+        gfx.draw_text("CHANNELS 2.4G", 4, g.CONTENT_Y, g.ACCENT)
+        self._hint("J/L>sys")
+        if not self.aps:
+            gfx.draw_text("scanning air...", 6, g.HEIGHT // 2, g.GREY)
+            return
+        counts = [0] * 14
+        for _ssid, ch, _rssi, _sec in self.aps:
+            if 1 <= ch <= 13:
+                counts[ch] += 1
+        peak = max(counts) or 1
+        top = g.CONTENT_Y + 14
+        h = 70
+        base = top + h
+        cw = g.WIDTH // 13
+        for ch in range(1, 14):
+            c = counts[ch]
+            x = (ch - 1) * cw + 1
+            col = g.RED if c >= 3 else (g.YELLOW if c == 2 else (g.GREEN if c == 1 else g.DIM))
+            bh = int(h * c / peak)
+            gfx.draw_rect(x, base - bh, cw - 2, bh, col, fill=True)
+            gfx.draw_text(str(ch), x, base + 2, g.GREY)
+            if c:
+                gfx.draw_text(str(c), x, base - bh - 9, g.WHITE)
+        busiest = counts.index(peak) if peak else 0
+        # recommend the emptiest of the non-overlapping channels 1/6/11
+        clear = min((1, 6, 11), key=lambda c: counts[c])
+        gfx.draw_text("busiest CH%d  use CH%d" % (busiest, clear),
+                     4, g.HEIGHT - 10, g.ACCENT)
 
     # --- system telemetry view ---
     def _statbar(self, y, label, frac, value, col):
@@ -186,16 +230,14 @@ class NetworkApp(App):
     def _render_sys(self):
         gfx = self.gfx
         gfx.draw_text("SPRIG SYSTEMS", 4, g.CONTENT_Y, g.ACCENT)
-        gfx.draw_text("J/L:rf", g.WIDTH - 8 * 6 - 2, g.CONTENT_Y, g.DIM)
+        self._hint("J/L>rf")
         y = g.CONTENT_Y + 12
-
         try:
             mhz = machine.freq() // 1000000
         except Exception:
             mhz = 0
         gfx.draw_text("RP2040  %d MHz" % mhz, 4, y, g.WHITE)
         y += 12
-
         try:
             t = _read_temp_c()
             tc = g.GREEN if t < 40 else (g.YELLOW if t < 50 else g.RED)
@@ -203,32 +245,26 @@ class NetworkApp(App):
         except Exception:
             gfx.draw_text("TEMP  n/a", 4, y, g.DIM)
         y += 11
-
         try:
             alloc = gc.mem_alloc()
-            free = gc.mem_free()
-            total = alloc + free
+            total = alloc + gc.mem_free()
             self._statbar(y, "RAM", alloc / total, "%dk" % (alloc // 1024),
                          g.GREEN if alloc / total < 0.75 else g.RED)
         except Exception:
             pass
         y += 11
-
         try:
             st = os.statvfs("/")
-            fbs, fblk, ffree = st[0], st[2], st[3]
-            ftot = fbs * fblk
-            fused = ftot - fbs * ffree
+            ftot = st[0] * st[2]
+            fused = ftot - st[0] * st[3]
             self._statbar(y, "FLASH", fused / ftot, "%dk" % (fused // 1024), g.BLUE)
         except Exception:
             pass
         y += 12
-
         up = time.ticks_diff(time.ticks_ms(), self.boot) // 1000
         gfx.draw_text("UP   %d:%02d:%02d" % (up // 3600, (up % 3600) // 60, up % 60),
                      4, y, g.GREY)
         y += 10
-
         wlan = self.wifi.wlan
         try:
             ip = wlan.ifconfig()[0]
@@ -236,14 +272,12 @@ class NetworkApp(App):
             ip = "0.0.0.0"
         gfx.draw_text("IP   %s" % ip, 4, y, g.GREY)
         y += 10
-
         try:
             mac = _binascii.hexlify(wlan.config("mac"), ":").decode()
         except Exception:
             mac = "--"
         gfx.draw_text("MAC  %s" % mac, 4, y, g.GREY)
         y += 10
-
         try:
             rssi = wlan.status("rssi")
             ssid = wlan.config("essid")

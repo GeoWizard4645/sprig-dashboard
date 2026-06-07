@@ -17,6 +17,7 @@
 
 import gfx_engine as g
 import uasyncio as asyncio
+import time
 from app_base import App
 from wifi_manager import http_stream, JsonSax
 import config
@@ -140,53 +141,69 @@ class SportsApp(App):
     def __init__(self, gfx, wifi):
         super().__init__(gfx, wifi)
         self.tiers = config.SPORTS_TIERS
-        self.tier = 0
+        # tab 0 == LIVE home (all leagues); tab i>=1 == league tier i-1
+        self.labels = ["LIVE"] + [t[0] for t in self.tiers]
+        self.tab = 0
         self.cursor = 0
         self.cache = {}            # tier_idx -> list[event] (live-first)
+        self.live = []             # [(league_label, event)] aggregated live games
         self.standings = []        # F1 driver standings
         self.std_offset = 0
         self.loading = False
-        self._scanned = False
+
+    def _tier(self):
+        return self.tab - 1 if self.tab >= 1 else -1
 
     def _focus(self):
-        return self.tiers[self.tier][2]
+        t = self._tier()
+        return self.tiers[t][2] if t >= 0 else None
 
     def _has_live(self, tier):
         return any(e["state"] == "in" for e in self.cache.get(tier, []))
 
     def _f1_standings_mode(self):
-        return self.tier == 0 and not self._has_live(0) and bool(self.standings)
+        return self.tab == 1 and not self._has_live(0) and bool(self.standings)
 
     # -- data ---------------------------------------------------------------
-    async def _load(self, tier=None):
-        if tier is None:
-            tier = self.tier
+    async def _load(self, tier):
         label, path, _f = self.tiers[tier]
         if not await self.wifi.ensure():
             self.status = "no wifi"
             self.dirty = True
             return
-        self.loading = True
         self.status = "loading %s..." % label
         self.dirty = True
         url = "https://site.api.espn.com/apis/site/v2/sports/%s/scoreboard?limit=40" % path
-        try:
-            sb = _Scoreboard()
-            await http_stream(url, JsonSax(sb).feed)
-            evs = sb.events
-            for ev in evs:
-                ev["rows"].sort(key=lambda r: 0 if r[2] == "away" else 1)
-                ev["rows"] = [(r[0], r[1]) for r in ev["rows"]]
-            evs.sort(key=lambda e: _STATE_ORDER.get(e["state"], 3))   # live first
-            self.cache[tier] = evs
-            self.status = "" if evs else "no events"
-        except Exception as e:
-            self.status = "err: %s" % e
-        self.loading = False
-        # F1 with no live session -> make sure standings are available
+        sb = _Scoreboard()
+        await http_stream(url, JsonSax(sb).feed)
+        evs = sb.events
+        for ev in evs:
+            ev["rows"].sort(key=lambda r: 0 if r[2] == "away" else 1)
+            ev["rows"] = [(r[0], r[1]) for r in ev["rows"]]
+        evs.sort(key=lambda e: _STATE_ORDER.get(e["state"], 3))   # live first
+        self.cache[tier] = evs
         if tier == 0 and not self._has_live(0) and not self.standings:
             asyncio.create_task(self._load_standings())
-        self.dirty = True
+
+    async def _load_live(self):
+        """Lazily load every league and aggregate the in-progress games."""
+        live = []
+        errs = 0
+        for tier in range(len(self.tiers)):
+            try:
+                await self._load(tier)
+            except Exception:
+                errs += 1
+            for ev in self.cache.get(tier, []):
+                if ev["state"] == "in":
+                    live.append((self.tiers[tier][0], ev))
+        self.live = live
+        if live:
+            self.status = ""
+        elif errs == len(self.tiers):
+            self.status = "fetch failed"
+        else:
+            self.status = "nothing live"
 
     async def _load_standings(self):
         url = "https://site.api.espn.com/apis/v2/sports/racing/f1/standings"
@@ -199,69 +216,86 @@ class SportsApp(App):
             self.status = "std err: %s" % e
         self.dirty = True
 
-    async def _scan_all(self):
-        """First-run: load every league, default to the top-priority tier
-        with a live game (else F1 standings)."""
-        best = None
-        for i in range(len(self.tiers)):
-            await self._load(i)
-            if best is None and self._has_live(i):
-                best = i
-        self.tier = best if best is not None else 0
-        self.cursor = 0
-        self._scanned = True
-        if self.tier == 0 and not self._has_live(0) and not self.standings:
-            await self._load_standings()
+    async def refresh(self):
+        self.loading = True
+        try:
+            if self.tab == 0:
+                await self._load_live()
+            else:
+                await self._load(self._tier())
+                self.status = ""
+        except Exception as e:
+            self.status = "err: %s" % e
+        self.loading = False
         self.dirty = True
 
-    async def refresh(self):
-        if not self._scanned:
-            await self._scan_all()
+    def _ensure(self):
+        """Lazy-load whatever the freshly selected tab needs."""
+        if self.loading:
+            return
+        if self.tab == 0:
+            if not self.live:
+                self.loading = True
+                asyncio.create_task(self._refresh_task())
         else:
-            await self._load(self.tier)
+            t = self._tier()
+            if t not in self.cache:
+                self.loading = True
+                asyncio.create_task(self._refresh_task())
 
-    def _ensure_loaded(self):
-        if self.tier not in self.cache and not self.loading:
-            asyncio.create_task(self._load(self.tier))
+    async def _refresh_task(self):
+        await self.refresh()
+        self.last_refresh = time.ticks_ms()   # keep main's scheduler in sync
 
     # -- navigation ---------------------------------------------------------
     def _events(self):
-        return self.cache.get(self.tier, [])
+        t = self._tier()
+        return self.cache.get(t, []) if t >= 0 else []
+
+    def _scroll_len(self):
+        if self.tab == 0:
+            return len(self.live)
+        if self._f1_standings_mode():
+            return len(self.standings)
+        return len(self._events())
 
     def on_up(self):
         if self._f1_standings_mode():
             self.std_offset = max(0, self.std_offset - 1)
         else:
-            ev = self._events()
-            if ev:
-                self.cursor = (self.cursor - 1) % len(ev)
+            n = self._scroll_len()
+            if n:
+                self.cursor = (self.cursor - 1) % n
         self.dirty = True
 
     def on_down(self):
         if self._f1_standings_mode():
             self.std_offset = min(max(0, len(self.standings) - 8), self.std_offset + 1)
         else:
-            ev = self._events()
-            if ev:
-                self.cursor = (self.cursor + 1) % len(ev)
+            n = self._scroll_len()
+            if n:
+                self.cursor = (self.cursor + 1) % n
         self.dirty = True
 
     def on_left(self):
-        self.tier = (self.tier - 1) % len(self.tiers)
+        self.tab = (self.tab - 1) % len(self.labels)
         self.cursor = 0
         self.std_offset = 0
-        self._ensure_loaded()
+        self._ensure()
         self.dirty = True
 
     def on_right(self):
-        self.tier = (self.tier + 1) % len(self.tiers)
+        self.tab = (self.tab + 1) % len(self.labels)
         self.cursor = 0
         self.std_offset = 0
-        self._ensure_loaded()
+        self._ensure()
         self.dirty = True
 
     def on_select(self):
-        asyncio.create_task(self._load(self.tier))
+        self._ensure()
+        if not self.loading:
+            self.loading = True
+            asyncio.create_task(self._refresh_task())
         self.dirty = True
 
     def on_enter(self):
@@ -270,6 +304,9 @@ class SportsApp(App):
     # -- rendering ----------------------------------------------------------
     def render(self):
         self._tabs()
+        if self.tab == 0:
+            self._live_home()
+            return
         if self._f1_standings_mode():
             self._standings()
             return
@@ -285,21 +322,56 @@ class SportsApp(App):
 
     def _tabs(self):
         gfx = self.gfx
-        x = 2
+        x = 1
         y = g.CONTENT_Y
-        for i, (label, _p, _f) in enumerate(self.tiers):
-            active = (i == self.tier)
-            live = self._has_live(i)
-            w = 8 * len(label) + 6
+        for i, label in enumerate(self.labels):
+            active = (i == self.tab)
+            live = (i == 0 and bool(self.live)) or (i >= 1 and self._has_live(i - 1))
+            w = 8 * len(label) + 4
             if active:
                 gfx.draw_rect(x, y, w, 11, g.ACCENT, fill=True)
-                gfx.draw_text(label, x + 3, y + 2, g.BLACK)
+                gfx.draw_text(label, x + 2, y + 2, g.BLACK)
             else:
                 gfx.draw_rect(x, y, w, 11, g.RED if live else g.DIM)
-                gfx.draw_text(label, x + 3, y + 2, g.RED if live else g.GREY)
-            if live:                       # live dot
+                gfx.draw_text(label, x + 2, y + 2, g.RED if live else g.GREY)
+            if live and not active:
                 gfx.draw_rect(x + w - 3, y + 1, 2, 2, g.RED, fill=True)
-            x += w + 3
+            x += w + 2
+
+    def _live_home(self):
+        gfx = self.gfx
+        y = g.CONTENT_Y + 14
+        if not self.live:
+            if self.loading:
+                gfx.draw_text("scanning leagues...", 6, y + 8, g.YELLOW)
+            else:
+                gfx.draw_text("No games live right now", 6, y + 8, g.GREY)
+                gfx.draw_text("J/L browse leagues", 6, y + 22, g.DIM)
+            return
+        gfx.draw_text("LIVE NOW  (%d)" % len(self.live), 4, y, g.RED)
+        y += 13
+        row_h = 22
+        rows_fit = (g.HEIGHT - y) // row_h
+        if self.cursor >= len(self.live):
+            self.cursor = 0
+        start = 0
+        if self.cursor >= rows_fit:
+            start = self.cursor - rows_fit + 1
+        for i in range(start, min(len(self.live), start + rows_fit)):
+            lbl, ev = self.live[i]
+            sel = (i == self.cursor)
+            if sel:
+                gfx.draw_rect(0, y - 1, g.WIDTH, row_h, g.PANEL, fill=True)
+                gfx.vline(0, y - 1, row_h, g.RED)
+            gfx.draw_text(lbl, 4, y, g.ACCENT)
+            rows = ev["rows"]
+            if len(rows) >= 2 and len(rows[0][0]) <= 5:
+                gfx.draw_text("%s %s-%s %s" % (rows[0][0], rows[0][1], rows[1][1], rows[1][0]),
+                             40, y, g.WHITE)
+            else:
+                gfx.draw_text(ev["name"][:15], 40, y, g.WHITE)
+            gfx.draw_text(ev["detail"][:30], 4, y + 10, g.RED)
+            y += row_h
 
     def _standings(self):
         gfx = self.gfx

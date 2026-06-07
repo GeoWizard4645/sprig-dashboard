@@ -121,6 +121,11 @@ class Dashboard:
             self.switch_app(APP_PINS[gp])
             return
         name = NAV_PINS[gp]
+        # raw-input screens (e.g. ticker search) want instant single presses
+        # with no double-click detection, so repeats can't trigger select/back.
+        if getattr(self.app, "raw_input", False):
+            self._emit_single(name)
+            return
         if name in self._pending and time.ticks_diff(now, self._pending[name]) <= DOUBLE_MS:
             del self._pending[name]
             self._emit_double(name)

@@ -24,6 +24,10 @@ class App:
         self.dirty = True         # request a re-render
         self.status = ""          # transient status / error line
         self.last_refresh = 0     # ticks_ms of last successful refresh
+        # When True, main dispatches I/J/K/L as instant single presses with no
+        # double-click detection (so rapid repeats never read as select/back).
+        # Used by text-entry screens like the ticker search.
+        self.raw_input = False
 
     # -- lifecycle ----------------------------------------------------------
     def on_enter(self):
