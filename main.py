@@ -167,18 +167,27 @@ class Dashboard:
                 gfx.show()
             await asyncio.sleep_ms(33)
 
+    def _busy(self, a):
+        return getattr(a, "loading", False) or getattr(a, "loading_std", False)
+
     async def refresh_loop(self):
-        # Keeps EVERY app's data warm (not just the visible one), so switching
-        # apps is instant. The active app gets priority; background-only apps
-        # (e.g. the RF scanner) refresh solely while on screen.
+        # Keeps EVERY app's data warm (not just the visible one) so switching is
+        # instant. Priority order: the ACTIVE app first; then background apps,
+        # one at a time. A "heavy" background app (sports) is only warmed while
+        # the active screen is "light" -- so we use the spare capacity of light
+        # screens for heavy data, and don't pile work on data-heavy screens.
         while True:
             did = False
+            active_light = getattr(self.app, "bg_cost", "light") == "light"
             cands = [self.app]
             for a in self.apps.values():
-                if a is not self.app and getattr(a, "background_refresh", True):
-                    cands.append(a)
+                if a is self.app or not getattr(a, "background_refresh", True):
+                    continue
+                if getattr(a, "bg_cost", "light") == "heavy" and not active_light:
+                    continue           # don't add heavy work on a heavy screen
+                cands.append(a)
             for a in cands:
-                if a.due() and not getattr(a, "loading", False):
+                if a.due() and not self._busy(a):
                     a.last_refresh = time.ticks_ms()
                     ok = True
                     try:
@@ -194,6 +203,26 @@ class Dashboard:
                     did = True
                     break       # one refresh per pass keeps the UI responsive
             await asyncio.sleep_ms(60 if did else 500)
+
+    async def prefetch_loop(self):
+        # On light screens with spare RAM/CPU, warm the heaviest data (sports
+        # standings: F1 drivers + constructors, NFL/NBA/MLB tables) one league
+        # at a time. Idles (no fetch) once everything is warm, so it doesn't
+        # overwork the device or waste power.
+        sports = self.apps.get("D")
+        if sports is None or not hasattr(sports, "prefetch_step"):
+            return
+        while True:
+            await asyncio.sleep_ms(2500)
+            if getattr(self.app, "bg_cost", "light") != "light":
+                continue           # active screen is heavy -> stay out of its way
+            if not self.wifi.connected:
+                continue
+            try:
+                if await sports.prefetch_step():
+                    gc.collect()
+            except Exception:
+                pass
 
     async def clock_task(self):
         synced = False
@@ -228,6 +257,7 @@ class Dashboard:
         asyncio.create_task(self.clock_task())
         asyncio.create_task(self.input_loop())
         asyncio.create_task(self.refresh_loop())
+        asyncio.create_task(self.prefetch_loop())
         self.app.active = True
         self.app.on_enter()
         self.app.dirty = True

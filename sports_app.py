@@ -83,9 +83,11 @@ class _Scoreboard:
 
 class _Standings:
     """SAX handler: generic ESPN standings extractor. Works for F1 driver
-    standings (athlete + rank/championshipPts) and team leagues (team
-    abbreviation + wins/losses/ties). Streams the 150-235 KB document."""
-    _WANT = ("rank", "championshipPts", "wins", "losses", "ties", "winpercent")
+    standings (athlete + rank/championshipPts), F1 constructors (team +
+    rank/points) and team leagues (team abbreviation + wins/losses/ties).
+    Captures both an abbreviation and a short name per row so the renderer can
+    pick the nicer one. Streams the 150-235 KB document."""
+    _WANT = ("rank", "championshipPts", "points", "wins", "losses", "ties")
 
     def __init__(self):
         self.groups = []
@@ -100,7 +102,7 @@ class _Standings:
         if parent == ("a", "children"):
             self.grp = {"label": "", "rows": []}
         elif parent == ("a", "entries") and self.grp is not None:
-            self.row = {"name": "", "stats": {}}
+            self.row = {"abbr": "", "short": "", "stats": {}}
         elif parent == ("a", "stats") and self.row is not None:
             self.sname = None
             self.sval = None
@@ -127,9 +129,11 @@ class _Standings:
                 and not self.grp["label"]:
             self.grp["label"] = val
         if self.row is not None:
-            if gp == ("a", "entries") and key in ("abbreviation", "shortName") \
-                    and top in (("o", "team"), ("o", "athlete")) and not self.row["name"]:
-                self.row["name"] = val
+            if gp == ("a", "entries") and top in (("o", "team"), ("o", "athlete")):
+                if key == "abbreviation" and not self.row["abbr"]:
+                    self.row["abbr"] = val
+                elif key in ("shortDisplayName", "shortName") and not self.row["short"]:
+                    self.row["short"] = val
             elif par == ("a", "stats"):
                 if key == "name":
                     self.sname = val
@@ -140,6 +144,9 @@ class _Standings:
 class SportsApp(App):
     name = "SPORTS"
     refresh_interval = config.SPORTS_REFRESH_S
+    bg_cost = "heavy"             # streams big payloads -> warm only when idle
+    _BG_INTERVAL = 180           # relaxed refresh cadence when off screen (s)
+    _STD_TTL = 1800              # re-warm standings at most this often (s)
 
     def __init__(self, gfx, wifi):
         super().__init__(gfx, wifi)
@@ -152,6 +159,7 @@ class SportsApp(App):
         self.loading = False
         self.loading_std = False
         self.active = False
+        self.std_time = {}            # tier -> ticks_ms of last standings load
         # restore last-known data from flash for an instant first paint
         self.cache = {}
         for k, v in (cache.load("sports_scores", {}) or {}).items():
@@ -232,10 +240,9 @@ class SportsApp(App):
         url = "https://site.api.espn.com/apis/v2/sports/%s/standings" % path
         h = await self._stream(url, _Standings)
         kind = "f1" if path.startswith("racing") else "team"
-        groups = h.groups
-        if kind == "f1":
-            groups = [gp for gp in groups if "Driver" in gp["label"]] or groups[:1]
-        self.standings[tier] = {"kind": kind, "groups": groups}
+        # keep ALL groups: F1 -> drivers + constructors; teams -> conferences
+        self.standings[tier] = {"kind": kind, "groups": h.groups}
+        self.std_time[tier] = time.ticks_ms()
         cache.save("sports_standings", {str(k): v for k, v in self.standings.items()})
         self.status = ""
 
@@ -282,6 +289,37 @@ class SportsApp(App):
             self.status = "table err"
         self.loading_std = False
         self.dirty = True
+
+    def due(self):
+        # off-screen: refresh on a relaxed cadence to avoid overworking the device
+        if self.last_refresh == 0:
+            return True
+        interval = self.refresh_interval if self.active else self._BG_INTERVAL
+        return time.ticks_diff(time.ticks_ms(), self.last_refresh) >= interval * 1000
+
+    async def prefetch_step(self):
+        """One unit of background warming (called by main only on light screens).
+        Loads any missing standings, then re-warms a stale one. Returns True if
+        it did work, False when everything is warm (so the caller idles and we
+        don't burn power re-fetching)."""
+        if self.loading or self.loading_std:
+            return False
+        now = time.ticks_ms()
+        targets = [t for t in range(len(self.tiers)) if t not in self.standings]
+        if not targets:
+            targets = [t for t in range(len(self.tiers))
+                       if self.std_time.get(t, 0)
+                       and time.ticks_diff(now, self.std_time[t]) > self._STD_TTL * 1000]
+        if not targets:
+            return False
+        self.loading_std = True
+        try:
+            await self._load_standings(targets[0])
+        except Exception:
+            pass
+        finally:
+            self.loading_std = False
+        return True
 
     # -- navigation ---------------------------------------------------------
     def _events(self):
@@ -428,24 +466,40 @@ class SportsApp(App):
             gfx.draw_text(ev["detail"][:30], 4, y + 10, g.RED)
             y += row_h
 
+    @staticmethod
+    def _name(kind, r):
+        # F1 prefers the readable short name (driver "K. Antonelli", constructor
+        # "Mercedes"); team leagues prefer the compact abbreviation ("NE").
+        if kind == "f1":
+            return r.get("short") or r.get("abbr") or "?"
+        return r.get("abbr") or r.get("short") or "?"
+
     def _std_lines(self, st):
+        """Flatten groups into scrollable (text, is_header) lines. For F1 this
+        yields a DRIVERS section then a CONSTRUCTORS section -- two scrollable
+        lists in one column."""
         out = []
-        if st["kind"] == "f1":
-            for grp in st["groups"]:
-                for r in grp["rows"]:
-                    s = r["stats"]
-                    out.append(("%2s %-13s %4s" % (s.get("rank", ""), r["name"][:13],
-                                                   s.get("championshipPts", "")), False))
-        else:
-            for grp in st["groups"]:
-                out.append((grp["label"][:21], True))
-                for r in grp["rows"]:
-                    s = r["stats"]
+        kind = st["kind"]
+        for grp in st["groups"]:
+            lbl = grp["label"]
+            if kind == "f1":
+                hdr = "DRIVERS" if "Driver" in lbl else (
+                    "CONSTRUCTORS" if "Constructor" in lbl else lbl.upper()[:18])
+            else:
+                hdr = lbl[:21]
+            out.append((hdr, True))
+            for r in grp["rows"]:
+                s = r["stats"]
+                name = self._name(kind, r)
+                if kind == "f1":
+                    pts = s.get("championshipPts") or s.get("points") or ""
+                    out.append(("%2s %-12s %4s" % (s.get("rank", ""), name[:12], pts), False))
+                else:
                     rec = "%s-%s" % (s.get("wins", "?"), s.get("losses", "?"))
                     ti = s.get("ties", "")
                     if ti and ti != "0":
                         rec += "-" + ti
-                    out.append(("%-4s %s" % (r["name"][:4], rec), False))
+                    out.append(("%-4s %s" % (name[:4], rec), False))
         return out
 
     def _render_standings(self):

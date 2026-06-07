@@ -10,7 +10,7 @@ Four apps, switched with the D-pad cluster:
 |--------|-----|--------------|
 | **W** | Weather | Current temp (large), conditions, 3-day min/max bar chart (Open-Meteo) |
 | **S** | Finance | One scrolling ticker list (incl. S&P 500, Dow, QQQ, futures); drill-down with a **price chart + selectable timeframe** (1D/5D/1M/6M/1Y); single-press ribbon search. All list prices fetched in **one** Yahoo *spark* request; fetches retry across query1/query2 hosts |
-| **D** | Sports | **LIVE home** aggregating in-progress games across all leagues + per-league tabs (F1/NFL/NBA/MLB, lazy); **double-tap I/L toggles SCORES ↔ STANDINGS** (driver table for F1, W-L tables for NFL/NBA/MLB). All fetches retry for reliability (ESPN public API) |
+| **D** | Sports | **LIVE home** aggregating in-progress games across all leagues + per-league tabs (F1/NFL/NBA/MLB, lazy); **double-tap I/L toggles SCORES ↔ STANDINGS** — F1 shows **drivers AND constructors** as two scrollable sections, NFL/NBA/MLB show W-L tables. All fetches retry for reliability (ESPN public API) |
 | **A** | Ghost Sniffer | Three J/L views: RF signal histogram + waterfall + open-network count; **2.4 GHz channel-congestion analyzer**; and a **Sprig system monitor** (die temp, CPU clock, RAM/flash, uptime, IP/MAC, RSSI) |
 
 All data sources are **$0-cost, key-free public endpoints**.
@@ -86,6 +86,14 @@ The dashboard is built to be usable instantly and seamless after a short warm-up
 - **Boot preload.** On power-up every app starts fetching immediately (the
   active app first, then the rest in the background) — you don't have to open an
   app to make it load. Initial warm-up is roughly ~10 s on a good connection.
+- **Adaptive background scheduler.** The active app always has priority; other
+  apps load one at a time. "Heavy" data (sports scoreboards/standings) is only
+  warmed while you're on a *light* screen (weather/finance/scanner), so spare
+  capacity is used for heavy pulls and the device isn't piled with work while
+  you're already on a data-heavy screen. Off-screen apps refresh on a relaxed
+  cadence; a background prefetcher warms all standings (F1 drivers +
+  constructors, NFL/NBA/MLB) one league at a time and then **idles once warm**,
+  so it doesn't waste power.
 - **Flash cache.** Each app writes its last-known data to `/cache/*.json`
   (`cache.py`) and reloads it on boot, so subsequent power-ups paint real values
   instantly and just refresh in the background. Writes are atomic and throttled

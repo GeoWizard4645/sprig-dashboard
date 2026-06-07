@@ -21,6 +21,10 @@ class App:
     # (so data is ready the instant you switch to it). Live-only apps that block
     # (e.g. wlan.scan) set this False and refresh only while active.
     background_refresh = True
+    # "light" apps are cheap to refresh; "heavy" apps stream large payloads and
+    # are only warmed in the background while the active screen is light, so the
+    # device isn't overworked when you're already on a data-heavy screen.
+    bg_cost = "light"
 
     def __init__(self, gfx, wifi):
         self.gfx = gfx
