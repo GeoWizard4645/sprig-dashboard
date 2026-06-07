@@ -193,7 +193,7 @@ class Dashboard:
                     ok = True
                     try:
                         async with self.net:
-                            await a.refresh()
+                            await asyncio.wait_for(a.refresh(), 45)  # never stall forever
                     except Exception as e:
                         a.status = "refresh err: %s" % e
                         a.dirty = True
@@ -222,7 +222,7 @@ class Dashboard:
                 continue
             try:
                 async with self.net:
-                    did = await sports.prefetch_step()
+                    did = await asyncio.wait_for(sports.prefetch_step(), 45)
                 if did:
                     gc.collect()
             except Exception:

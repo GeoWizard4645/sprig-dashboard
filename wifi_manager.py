@@ -132,10 +132,13 @@ async def http_get_raw(url, headers=None, timeout=None, max_bytes=None):
                 break
         return bytes(buf)
     finally:
+        # Bound the close: writer.wait_closed() can hang on a half-broken TLS
+        # connection, and if it did the lock below would never release and EVERY
+        # later fetch would deadlock (UI frozen at last-good values).
         if writer is not None:
             try:
                 writer.close()
-                await writer.wait_closed()
+                await asyncio.wait_for(writer.wait_closed(), 3)
             except Exception:
                 pass
         _net_lock.release()
@@ -383,10 +386,13 @@ async def http_stream(url, sink, headers=None, timeout=None):
                 break
             deliver(ch)
     finally:
+        # Bound the close: writer.wait_closed() can hang on a half-broken TLS
+        # connection, and if it did the lock below would never release and EVERY
+        # later fetch would deadlock (UI frozen at last-good values).
         if writer is not None:
             try:
                 writer.close()
-                await writer.wait_closed()
+                await asyncio.wait_for(writer.wait_closed(), 3)
             except Exception:
                 pass
         _net_lock.release()

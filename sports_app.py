@@ -310,8 +310,9 @@ class SportsApp(App):
                 # otherwise served from flash; prefetch re-warms it every few hours
         except Exception as e:
             self.status = "err: %s" % str(e)[:16]
-        self.loading = False
-        self.dirty = True
+        finally:
+            self.loading = False        # never leave this stuck (even if cancelled)
+            self.dirty = True
 
     def due(self):
         if self.last_refresh == 0:
